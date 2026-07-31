@@ -482,7 +482,7 @@ export default function App() {
               <UsersView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "backup" && isAdmin && (
-              <BackupView data={data} persist={persist} showToast={showToast} />
+              <BackupView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "activity" && isAdmin && (
               <ActivityLogView data={data} />
@@ -1578,10 +1578,27 @@ function UsersView({ data, persist, showToast, currentUser }) {
 /* ---------------------------------------------------------
    Backup & Restore
 --------------------------------------------------------- */
-function BackupView({ data, persist, showToast }) {
+function BackupView({ data, persist, showToast, currentUser }) {
   const inputRef = React.useRef(null);
   const [pendingRestore, setPendingRestore] = useState(null); // parsed JSON awaiting confirm
   const [restoreError, setRestoreError] = useState("");
+
+  const orphanCount = useMemo(() => {
+    const assetIds = new Set(data.assets.map((a) => a.id));
+    return data.maintenance.filter((m) => !assetIds.has(m.assetId)).length;
+  }, [data.assets, data.maintenance]);
+
+  const cleanupOrphans = async () => {
+    const assetIds = new Set(data.assets.map((a) => a.id));
+    const removed = data.maintenance.filter((m) => !assetIds.has(m.assetId)).length;
+    const next = withLog(
+      { ...data, maintenance: data.maintenance.filter((m) => assetIds.has(m.assetId)) },
+      currentUser,
+      `Cleaned up ${removed} leftover maintenance record(s) not linked to any asset`
+    );
+    await persist(next);
+    showToast(`Removed ${removed} leftover record(s).`);
+  };
 
   const downloadBackup = () => {
     const json = JSON.stringify(data, null, 2);
@@ -1630,6 +1647,24 @@ function BackupView({ data, persist, showToast }) {
       <div className="view-head">
         <h2 className="view-title">Backup &amp; Restore</h2>
       </div>
+
+      {/* TEMPORARY: one-time cleanup for leftover demo maintenance records.
+          Remove this panel once orphanCount reaches 0 for you. */}
+      {orphanCount > 0 && (
+        <div className="panel">
+          <div className="panel-head"><h3>One-Time Cleanup</h3></div>
+          <div style={{ padding: "18px" }}>
+            <p className="login-sub" style={{ margin: "0 0 14px" }}>
+              Found <strong>{orphanCount}</strong> maintenance record(s) left over from
+              deleted assets (from before deletions started cleaning these up
+              automatically). This removes just those — nothing else is touched.
+            </p>
+            <button className="btn danger" onClick={cleanupOrphans}>
+              <Trash2 size={14} /> Remove {orphanCount} Leftover Record(s)
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="panel">
         <div className="panel-head"><h3>Download a Backup</h3></div>
