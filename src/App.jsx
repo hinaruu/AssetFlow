@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  ChevronLeft, ChevronRight, KeyRound, ShieldCheck, AlertTriangle, RefreshCw
+  ChevronLeft, ChevronRight, KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
+  Undo2, Bell, Copy, Truck,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { fetchOrgData, saveOrgData } from "./lib/supabase.js";
@@ -41,7 +42,35 @@ function withLog(data, currentUser, message) {
   return { ...data, auditLog };
 }
 
-const STATUS_OPTIONS = ["In Stock", "In Use", "Under Repair", "Retired", "Disposed"];
+// Builds the list of "upcoming attention needed" items shown in the
+// notification bell — warranty expiring (IT) and calibration due (Non-IT),
+// within the next 30 days or already overdue.
+function computeAlerts(assets, scopedLocationId) {
+  const list = scopedLocationId ? assets.filter((a) => a.locationId === scopedLocationId) : assets;
+  const now = new Date();
+  const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const alerts = [];
+  list.forEach((a) => {
+    if (a.assetType === "IT" && a.warrantyExpiry) {
+      const d = new Date(a.warrantyExpiry);
+      if (!isNaN(d) && d <= in30) {
+        alerts.push({ id: `${a.id}-w`, urgent: d < now, label: `${a.tag} — warranty ${d < now ? "expired" : "expiring"} ${a.warrantyExpiry}` });
+      }
+    }
+    if (a.assetType === "Non-IT" && a.requiresCalibration) {
+      const checkDate = a.nextCalibrationDate || a.calibrationDate;
+      if (checkDate) {
+        const d = new Date(checkDate);
+        if (!isNaN(d) && d <= in30) {
+          alerts.push({ id: `${a.id}-c`, urgent: d < now, label: `${a.tag} — calibration ${d < now ? "overdue" : "due"} ${checkDate}` });
+        }
+      }
+    }
+  });
+  return alerts.sort((a, b) => (b.urgent === a.urgent ? 0 : b.urgent ? 1 : -1));
+}
+
+
 const CONDITION_OPTIONS = ["New", "Good", "Fair", "Poor"];
 const MAINT_STATUS = ["Not Started", "In Progress", "Done"];
 
@@ -113,6 +142,10 @@ function generateMockAssets(locations, categories) {
     const cost = isIT ? 400 + (i % 12) * 350 : 80 + (i % 10) * 120;
     const locCode = loc.name.slice(0, 2).toUpperCase();
 
+    const requiresCalibration = !isIT && catId === "cat-tools";
+    const calDate = requiresCalibration ? `2026-${String(1 + ((i + 3) % 12)).padStart(2, "0")}-15` : "";
+    const nextCalDate = requiresCalibration ? `2027-${String(1 + ((i + 3) % 12)).padStart(2, "0")}-15` : "";
+
     assets.push({
       id: uid("ast"),
       tag: `AST-${locCode}-${String(counter++).padStart(3, "0")}`,
@@ -127,8 +160,11 @@ function generateMockAssets(locations, categories) {
       purchaseDate,
       purchaseCost: cost,
       warrantyExpiry: isIT ? `${year + 3}-${month}-${day}` : "",
-      calibrationDate: !isIT ? `2026-${String(1 + ((i + 3) % 12)).padStart(2, "0")}-15` : "",
+      requiresCalibration,
+      calibrationDate: calDate,
+      nextCalibrationDate: nextCalDate,
       notes: status === "Under Repair" ? "Reported issue — pending technician review" : "",
+      transferHistory: [],
     });
   }
   return assets;
@@ -300,6 +336,9 @@ export default function App() {
   const [connectionError, setConnectionError] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
+  const [historyStack, setHistoryStack] = useState([]); // snapshots for Undo
+  const dataRef = React.useRef(null);
+  useEffect(() => { dataRef.current = data; }, [data]);
 
   const showToast = useCallback((msg) => {
     setToast({ message: msg, phase: "in" });
@@ -354,6 +393,7 @@ export default function App() {
 
   // Save org data to the shared database whenever it changes locally
   const persist = useCallback(async (next) => {
+    setHistoryStack((h) => [dataRef.current, ...h].slice(0, 15));
     setData(next);
     try {
       await saveOrgData(next);
@@ -362,6 +402,22 @@ export default function App() {
       showToast("Could not save — check your connection and try again.");
     }
   }, [showToast]);
+
+  // Reverts to the state immediately before the last save (assets, categories,
+  // locations, maintenance, users — everything persist() touches).
+  const undoLast = useCallback(async () => {
+    const [last, ...rest] = historyStack;
+    if (!last) { showToast("Nothing to undo."); return; }
+    setHistoryStack(rest);
+    setData(last);
+    try {
+      await saveOrgData(last);
+      setLastSynced(new Date());
+      showToast("Last action undone.");
+    } catch {
+      showToast("Undo failed to save — check your connection.");
+    }
+  }, [historyStack, showToast]);
 
   // Manually pull the latest data from the shared database
   const syncNow = useCallback(async () => {
@@ -466,6 +522,9 @@ export default function App() {
             onSync={syncNow}
             syncing={syncing}
             lastSynced={lastSynced}
+            data={data}
+            canUndo={historyStack.length > 0}
+            onUndo={undoLast}
           />
           <div className="content">
             {view === "dashboard" && (
@@ -561,13 +620,20 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
 /* ---------------------------------------------------------
    Top Bar
 --------------------------------------------------------- */
-function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced }) {
+function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, canUndo, onUndo }) {
+  const [notifOpen, setNotifOpen] = useState(false);
+  const isAdmin = currentUser.role === "Admin";
   const locName = scopedLocationId
     ? locations.find((l) => l.id === scopedLocationId)?.name
     : "All Locations (HQ)";
   const syncedLabel = lastSynced
     ? `Synced ${lastSynced.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
     : "";
+
+  const alerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
+  const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
+  const notifCount = alerts.length;
+
   return (
     <div className="topbar">
       <div className="topbar-left">
@@ -578,6 +644,36 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
         <button className="icon-btn" onClick={onSync} title="Sync with latest data" disabled={syncing}>
           <RefreshCw size={16} className={syncing ? "spin" : ""} />
         </button>
+        <button className="icon-btn" onClick={onUndo} title={canUndo ? "Undo last action" : "Nothing to undo"} disabled={!canUndo}>
+          <Undo2 size={16} />
+        </button>
+        <div className="notif-wrap">
+          <button className="icon-btn" onClick={() => setNotifOpen((o) => !o)} title="Notifications">
+            <Bell size={16} />
+            {notifCount > 0 && <span className="notif-dot">{notifCount > 9 ? "9+" : notifCount}</span>}
+          </button>
+          {notifOpen && (
+            <>
+              <div className="notif-backdrop" onClick={() => setNotifOpen(false)} />
+              <div className="notif-panel">
+                <div className="notif-section-title">Needs Attention</div>
+                {alerts.length === 0 && <div className="notif-empty">Nothing expiring in the next 30 days.</div>}
+                {alerts.slice(0, 8).map((a) => (
+                  <div key={a.id} className={`notif-item ${a.urgent ? "urgent" : ""}`}>{a.label}</div>
+                ))}
+                {isAdmin && (
+                  <>
+                    <div className="notif-section-title" style={{ marginTop: 10 }}>Recent Activity</div>
+                    {recentActivity.length === 0 && <div className="notif-empty">No activity yet.</div>}
+                    {recentActivity.map((l) => (
+                      <div key={l.id} className="notif-item">{l.userName}: {l.message}</div>
+                    ))}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
         <button className="icon-btn" onClick={toggleTheme} title="Toggle theme">
           {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
         </button>
@@ -698,9 +794,9 @@ function DonutCard({ title, data, palette }) {
       {data.length === 0 ? (
         <div className="empty-chart">No data to display</div>
       ) : (
-        <ResponsiveContainer width="100%" height={260}>
+        <ResponsiveContainer width="100%" height={190}>
           <PieChart>
-            <Pie data={data} dataKey="value" nameKey="name" innerRadius={62} outerRadius={92} paddingAngle={2}>
+            <Pie data={data} dataKey="value" nameKey="name" innerRadius={44} outerRadius={66} paddingAngle={2}>
               {data.map((entry, i) => (
                 <Cell key={entry.name} fill={colors(entry.name, i)} />
               ))}
@@ -711,8 +807,8 @@ function DonutCard({ title, data, palette }) {
               labelStyle={{ fontSize: 12 }}
             />
             <Legend
-              wrapperStyle={{ fontSize: 11.5, lineHeight: "18px" }}
-              iconSize={9}
+              wrapperStyle={{ fontSize: 11, lineHeight: "16px" }}
+              iconSize={8}
               iconType="circle"
             />
           </PieChart>
@@ -730,7 +826,8 @@ function emptyAsset(defaultLocationId) {
     id: null, tag: "", name: "", categoryId: "", assetType: "IT", brand: "", model: "",
     serial: "", status: "In Stock", condition: "New", locationId: defaultLocationId || "",
     assignedTo: "", purchaseDate: todayISO(), purchaseCost: "", warrantyExpiry: "",
-    calibrationDate: "", notes: "",
+    requiresCalibration: false, calibrationDate: "", nextCalibrationDate: "",
+    notes: "", transferHistory: [],
   };
 }
 
@@ -740,18 +837,25 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [userFilter, setUserFilter] = useState("all");
   const [editing, setEditing] = useState(null);
+  const [viewing, setViewing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [requestDeleteTarget, setRequestDeleteTarget] = useState(null); // asset id awaiting a reason
   const [deleteReason, setDeleteReason] = useState("");
   const [selected, setSelected] = useState([]);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportText, setExportText] = useState("");
+  const [transferTarget, setTransferTarget] = useState(null); // asset id
+  const [transferLocationId, setTransferLocationId] = useState("");
+  const [transferReason, setTransferReason] = useState("");
   const fileInputRef = React.useRef(null);
 
+  // Regional Staff should only see assigned-user names from their own
+  // location's assets, not the whole company's.
   const assignedUserOptions = useMemo(() => {
-    const set = new Set(data.assets.map((a) => a.assignedTo).filter(Boolean));
+    const scoped = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
+    const set = new Set(scoped.map((a) => a.assignedTo).filter(Boolean));
     return Array.from(set).sort();
-  }, [data.assets]);
+  }, [data.assets, scopedLocationId]);
 
   const visibleAssets = useMemo(() => {
     let list = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
@@ -830,6 +934,53 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast(`${selected.length} asset(s) deleted.`);
   };
 
+  const duplicateAsset = (asset) => {
+    setEditing({
+      ...asset,
+      id: null,
+      tag: "",
+      serial: "",
+      assignedTo: "",
+      status: "In Stock",
+      transferHistory: [],
+    });
+  };
+
+  const startTransfer = (asset) => {
+    setTransferTarget(asset.id);
+    setTransferLocationId("");
+    setTransferReason("");
+  };
+
+  const submitTransfer = () => {
+    if (!transferLocationId) { alert("Please select a destination location."); return; }
+    if (!transferReason.trim()) { alert("Please enter a reason for this transfer."); return; }
+    const asset = data.assets.find((a) => a.id === transferTarget);
+    if (!asset) return;
+    const fromLoc = data.locations.find((l) => l.id === asset.locationId)?.name || "Unknown";
+    const toLoc = data.locations.find((l) => l.id === transferLocationId)?.name || "Unknown";
+    const transferEntry = {
+      id: uid("xfer"),
+      fromLocationId: asset.locationId,
+      fromLocationName: fromLoc,
+      toLocationId: transferLocationId,
+      toLocationName: toLoc,
+      reason: transferReason.trim(),
+      by: currentUser.name,
+      at: new Date().toISOString(),
+    };
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === transferTarget
+        ? { ...a, locationId: transferLocationId, transferHistory: [transferEntry, ...(a.transferHistory || [])] }
+        : a)),
+    }, currentUser, `Transferred asset "${asset.name || asset.tag}" from ${fromLoc} to ${toLoc} — reason: ${transferReason.trim()}`);
+    persist(next);
+    setTransferTarget(null);
+    setTransferReason("");
+    showToast("Asset transferred.");
+  };
+
   // Non-admins can't delete outright — they submit a reason, and the asset
   // is flagged for the Admin to approve or reject under "Approvals".
   const submitDeleteRequest = async () => {
@@ -855,12 +1006,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
   };
 
-  const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "calibrationDate"];
+  const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
 
   const buildCSV = () => {
     const rows = visibleAssets.map((a) => {
       const loc = data.locations.find((l) => l.id === a.locationId)?.name || "";
-      return [a.tag, a.name, a.assetType, a.brand, a.model, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.calibrationDate];
+      return [a.tag, a.name, a.assetType, a.brand, a.model, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.requiresCalibration ? "Yes" : "No", a.calibrationDate, a.nextCalibrationDate];
     });
     return [EXPORT_COLS.join(","), ...rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
   };
@@ -945,8 +1096,11 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
             purchaseDate: row.purchaseDate || todayISO(),
             purchaseCost: Number(row.purchaseCost) || 0,
             warrantyExpiry: row.warrantyExpiry || "",
+            requiresCalibration: (row.requiresCalibration || "").toLowerCase() === "yes",
             calibrationDate: row.calibrationDate || "",
+            nextCalibrationDate: row.nextCalibrationDate || "",
             notes: "",
+            transferHistory: [],
           });
         }
         persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via CSV`));
@@ -1035,7 +1189,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                         }
                       />
                     </td>
-                    <td className="mono">{a.tag}</td>
+                    <td>
+                      <button className="link-tag" onClick={() => setViewing(a)} title="View details">{a.tag}</button>
+                    </td>
                     <td>{a.name}</td>
                     <td>{cat?.name || "—"}</td>
                     <td>{loc?.name || "—"}</td>
@@ -1052,6 +1208,8 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     <td>
                       <div className="row-actions">
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(a)} />
+                        <IconBtn icon={Copy} title="Duplicate" onClick={() => duplicateAsset(a)} />
+                        <IconBtn icon={Truck} title="Transfer to another location" onClick={() => startTransfer(a)} />
                         <IconBtn
                           icon={Trash2}
                           title={!isAdmin && a.pendingDeletion ? "Awaiting Admin approval" : "Delete"}
@@ -1114,6 +1272,44 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           <div className="modal-actions">
             <button type="button" className="btn ghost" onClick={() => setExportOpen(false)}>Close</button>
             <button type="button" className="btn primary" onClick={copyExport}>Copy to Clipboard</button>
+          </div>
+        </Modal>
+      )}
+      {viewing && (
+        <AssetDetailModal
+          asset={viewing}
+          categories={data.categories}
+          locations={data.locations}
+          onClose={() => setViewing(null)}
+          onEdit={() => { setEditing(viewing); setViewing(null); }}
+          onTransfer={() => { startTransfer(viewing); setViewing(null); }}
+        />
+      )}
+      {transferTarget && (
+        <Modal title="Transfer Asset" onClose={() => setTransferTarget(null)} width={440}>
+          <div className="form-grid">
+            <div className="form-full hint-box">
+              Moving this asset to a different location will be recorded in its history along with your reason.
+            </div>
+            <div className="form-full">
+              <Field label="Destination Location">
+                <select value={transferLocationId} onChange={(e) => setTransferLocationId(e.target.value)}>
+                  <option value="">Select location</option>
+                  {data.locations.filter((l) => l.id !== data.assets.find((a) => a.id === transferTarget)?.locationId).map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="form-full">
+              <Field label="Reason for transfer">
+                <textarea value={transferReason} onChange={(e) => setTransferReason(e.target.value)} rows={3} placeholder='e.g. "Shipped to Philippines for new hire"' autoFocus />
+              </Field>
+            </div>
+            <div className="form-full modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setTransferTarget(null)}>Cancel</button>
+              <button type="button" className="btn primary" onClick={submitTransfer}>Confirm Transfer</button>
+            </div>
           </div>
         </Modal>
       )}
@@ -1182,7 +1378,25 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
         {form.assetType === "IT" ? (
           <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
         ) : (
-          <Field label="Calibration Date"><input type="date" value={form.calibrationDate} onChange={(e) => set("calibrationDate", e.target.value)} /></Field>
+          <Field label="Requires Calibration?">
+            <select
+              value={form.requiresCalibration ? "yes" : "no"}
+              onChange={(e) => set("requiresCalibration", e.target.value === "yes")}
+            >
+              <option value="no">No</option>
+              <option value="yes">Yes</option>
+            </select>
+          </Field>
+        )}
+        {form.assetType === "Non-IT" && form.requiresCalibration && (
+          <>
+            <Field label="Calibration Date">
+              <input type="date" value={form.calibrationDate} onChange={(e) => set("calibrationDate", e.target.value)} />
+            </Field>
+            <Field label="Next Recalibration Date">
+              <input type="date" value={form.nextCalibrationDate} onChange={(e) => set("nextCalibrationDate", e.target.value)} />
+            </Field>
+          </>
         )}
         <div className="form-full">
           <Field label="Notes">
@@ -1193,6 +1407,59 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" onClick={submit}>Save Asset</button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Asset Detail Modal (read-only view, opened by clicking the tag)
+--------------------------------------------------------- */
+function AssetDetailModal({ asset, categories, locations, onClose, onEdit, onTransfer }) {
+  const cat = categories.find((c) => c.id === asset.categoryId);
+  const loc = locations.find((l) => l.id === asset.locationId);
+  const row = (label, value) => (
+    <div className="detail-row">
+      <span className="detail-label">{label}</span>
+      <span className="detail-value">{value || "—"}</span>
+    </div>
+  );
+  return (
+    <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={560}>
+      <div className="detail-grid">
+        {row("Name", asset.name)}
+        {row("Asset Type", asset.assetType)}
+        {row("Category", cat?.name)}
+        {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
+        {row("Serial Number", asset.serial)}
+        {row("Status", <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>)}
+        {row("Condition", asset.condition)}
+        {row("Location", loc?.name)}
+        {row("Assigned To", asset.assignedTo)}
+        {row("Purchase Date", asset.purchaseDate)}
+        {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
+        {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
+        {asset.assetType === "Non-IT" && row("Requires Calibration?", asset.requiresCalibration ? "Yes" : "No")}
+        {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Calibration Date", asset.calibrationDate)}
+        {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Next Recalibration Date", asset.nextCalibrationDate)}
+        {row("Notes", asset.notes)}
+      </div>
+
+      {asset.transferHistory && asset.transferHistory.length > 0 && (
+        <div className="detail-transfer-history">
+          <div className="notif-section-title">Transfer History</div>
+          {asset.transferHistory.map((t) => (
+            <div key={t.id} className="notif-item">
+              {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleDateString()})
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="modal-actions" style={{ marginTop: 16 }}>
+        <button type="button" className="btn ghost" onClick={onClose}>Close</button>
+        <button type="button" className="btn ghost" onClick={onTransfer}><Truck size={14} /> Transfer</button>
+        <button type="button" className="btn primary" onClick={onEdit}><Pencil size={14} /> Edit</button>
       </div>
     </Modal>
   );
@@ -2022,6 +2289,27 @@ function GlobalStyles() {
       .user-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; }
       .user-role { font-size: 11px; color: var(--text-soft); }
 
+      .link-tag { background: none; border: none; padding: 0; font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+      .link-tag:hover { opacity: 0.8; }
+
+      .notif-wrap { position: relative; }
+      .notif-dot { position: absolute; top: -3px; right: -3px; background: var(--danger); color: white; font-size: 9.5px; font-weight: 700; border-radius: 999px; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
+      .notif-backdrop { position: fixed; inset: 0; z-index: 60; }
+      .notif-panel { position: absolute; top: calc(100% + 8px); right: 0; width: 300px; max-height: 360px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 28px rgba(0,0,0,0.18); padding: 12px; z-index: 61; scrollbar-width: none; }
+      .notif-panel::-webkit-scrollbar { display: none; }
+      .notif-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-soft); margin-bottom: 6px; }
+      .notif-item { font-size: 12.5px; padding: 6px 0; border-bottom: 1px solid var(--border); line-height: 1.4; }
+      .notif-item:last-child { border-bottom: none; }
+      .notif-item.urgent { color: var(--danger); font-weight: 600; }
+      .notif-empty { font-size: 12.5px; color: var(--text-soft); padding: 4px 0 8px; }
+
+      .detail-grid { display: flex; flex-direction: column; gap: 0; }
+      .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+      .detail-row:last-child { border-bottom: none; }
+      .detail-label { color: var(--text-soft); font-weight: 500; }
+      .detail-value { font-weight: 600; text-align: right; }
+      .detail-transfer-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
       .content { padding: 24px; flex: 1; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; }
       .content::-webkit-scrollbar { display: none; }
 
@@ -2031,7 +2319,7 @@ function GlobalStyles() {
       .metric-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
 
       .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
-      .chart-card { min-height: 320px; }
+      .chart-card { min-height: 230px; }
       .empty-chart { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--text-soft); font-size: 13px; }
 
       .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
