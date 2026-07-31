@@ -27,6 +27,20 @@ function sha256(text) {
 const uid = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const todayISO = () => new Date().toISOString().split("T")[0];
 
+// Appends an entry to the audit log, tagged with who did it and when.
+// Keeps only the most recent 300 entries so it doesn't grow forever.
+function withLog(data, currentUser, message) {
+  const entry = {
+    id: uid("log"),
+    at: new Date().toISOString(),
+    userId: currentUser?.id || null,
+    userName: currentUser?.name || "Unknown",
+    message,
+  };
+  const auditLog = [entry, ...(data.auditLog || [])].slice(0, 300);
+  return { ...data, auditLog };
+}
+
 const STATUS_OPTIONS = ["In Stock", "In Use", "Under Repair", "Retired", "Disposed"];
 const CONDITION_OPTIONS = ["New", "Good", "Fair", "Poor"];
 const MAINT_STATUS = ["Not Started", "In Progress", "Done"];
@@ -54,7 +68,7 @@ function seedData() {
     { id: "cat-tools", name: "Tools & Testing Equipment", type: "Non-IT", usefulLife: 5 },
   ];
   const assets = generateMockAssets(locations, categories);
-  return { locations, categories, assets, maintenance: generateMockMaintenance(assets), users: [] };
+  return { locations, categories, assets, maintenance: generateMockMaintenance(assets), users: [], auditLog: [] };
 }
 
 const SAMPLE_STAFF = [
@@ -452,22 +466,26 @@ export default function App() {
                 isAdmin={isAdmin}
                 scopedLocationId={scopedLocationId}
                 showToast={showToast}
+                currentUser={currentUser}
               />
             )}
             {view === "maintenance" && (
-              <MaintenanceView data={data} persist={persist} showToast={showToast} scopedLocationId={scopedLocationId} />
+              <MaintenanceView data={data} persist={persist} showToast={showToast} scopedLocationId={scopedLocationId} currentUser={currentUser} />
             )}
             {view === "categories" && isAdmin && (
-              <CategoriesView data={data} persist={persist} showToast={showToast} />
+              <CategoriesView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "locations" && isAdmin && (
-              <LocationsView data={data} persist={persist} showToast={showToast} />
+              <LocationsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "users" && isAdmin && (
-              <UsersView data={data} persist={persist} showToast={showToast} />
+              <UsersView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "backup" && isAdmin && (
               <BackupView data={data} persist={persist} showToast={showToast} />
+            )}
+            {view === "activity" && isAdmin && (
+              <ActivityLogView data={data} />
             )}
           </div>
         </div>
@@ -490,6 +508,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin }) {
       { id: "locations", label: "Locations", icon: MapPin },
       { id: "users", label: "User Accounts", icon: Users },
       { id: "backup", label: "Backup & Restore", icon: Download },
+      { id: "activity", label: "Activity Log", icon: ShieldCheck },
     ] : []),
   ];
   return (
@@ -694,7 +713,7 @@ function emptyAsset(defaultLocationId) {
   };
 }
 
-function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast }) {
+function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, currentUser }) {
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -734,10 +753,10 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast }) {
   const save = async (asset) => {
     let next;
     if (asset.id) {
-      next = { ...data, assets: data.assets.map((a) => (a.id === asset.id ? asset : a)) };
+      next = withLog({ ...data, assets: data.assets.map((a) => (a.id === asset.id ? asset : a)) }, currentUser, `Edited asset "${asset.name || asset.tag}"`);
     } else {
       const newAsset = { ...asset, id: uid("ast"), tag: asset.tag || `AST-${uid("X").slice(-6).toUpperCase()}` };
-      next = { ...data, assets: [newAsset, ...data.assets] };
+      next = withLog({ ...data, assets: [newAsset, ...data.assets] }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`);
     }
     persist(next);
     setEditing(null);
@@ -745,7 +764,14 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast }) {
   };
 
   const remove = async (id) => {
-    const next = { ...data, assets: data.assets.filter((a) => a.id !== id) };
+    const asset = data.assets.find((a) => a.id === id);
+    const removedLogs = data.maintenance.filter((m) => m.assetId === id).length;
+    const suffix = removedLogs > 0 ? ` (and ${removedLogs} maintenance record${removedLogs > 1 ? "s" : ""})` : "";
+    const next = withLog({
+      ...data,
+      assets: data.assets.filter((a) => a.id !== id),
+      maintenance: data.maintenance.filter((m) => m.assetId !== id),
+    }, currentUser, `Deleted asset "${asset?.name || asset?.tag || id}"${suffix}`);
     persist(next);
     setConfirmDelete(null);
     setSelected((s) => s.filter((x) => x !== id));
@@ -753,7 +779,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast }) {
   };
 
   const bulkDelete = async () => {
-    const next = { ...data, assets: data.assets.filter((a) => !selected.includes(a.id)) };
+    const removedLogs = data.maintenance.filter((m) => selected.includes(m.assetId)).length;
+    const suffix = removedLogs > 0 ? ` (and ${removedLogs} maintenance record${removedLogs > 1 ? "s" : ""})` : "";
+    const next = withLog({
+      ...data,
+      assets: data.assets.filter((a) => !selected.includes(a.id)),
+      maintenance: data.maintenance.filter((m) => !selected.includes(m.assetId)),
+    }, currentUser, `Deleted ${selected.length} asset(s) in bulk${suffix}`);
     persist(next);
     setSelected([]);
     showToast(`${selected.length} asset(s) deleted.`);
@@ -853,7 +885,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast }) {
             notes: "",
           });
         }
-        persist({ ...data, assets: [...newAssets, ...data.assets] });
+        persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via CSV`));
         showToast(`Imported ${newAssets.length} asset(s).`);
       } catch {
         showToast("Could not parse this CSV file.");
@@ -1084,7 +1116,7 @@ function emptyMaint(assetId) {
   return { id: null, assetId: assetId || "", description: "", cost: "", date: todayISO(), status: "Not Started" };
 }
 
-function MaintenanceView({ data, persist, showToast, scopedLocationId }) {
+function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUser }) {
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
@@ -1094,12 +1126,14 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId }) {
 
   const [selected, setSelected] = useState([]);
 
+  const assetLabel = (assetId) => data.assets.find((a) => a.id === assetId)?.name || data.assets.find((a) => a.id === assetId)?.tag || "an asset";
+
   const save = async (log) => {
     let next;
     if (log.id) {
-      next = { ...data, maintenance: data.maintenance.map((m) => (m.id === log.id ? log : m)) };
+      next = withLog({ ...data, maintenance: data.maintenance.map((m) => (m.id === log.id ? log : m)) }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`);
     } else {
-      next = { ...data, maintenance: [{ ...log, id: uid("maint") }, ...data.maintenance] };
+      next = withLog({ ...data, maintenance: [{ ...log, id: uid("maint") }, ...data.maintenance] }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}`);
     }
     persist(next);
     setEditing(null);
@@ -1107,19 +1141,24 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId }) {
   };
 
   const remove = async (id) => {
-    persist({ ...data, maintenance: data.maintenance.filter((m) => m.id !== id) });
+    const log = data.maintenance.find((m) => m.id === id);
+    const next = withLog({ ...data, maintenance: data.maintenance.filter((m) => m.id !== id) }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`);
+    persist(next);
     setConfirmDelete(null);
     showToast("Maintenance entry deleted.");
   };
 
   const bulkDelete = async () => {
-    persist({ ...data, maintenance: data.maintenance.filter((m) => !selected.includes(m.id)) });
+    const next = withLog({ ...data, maintenance: data.maintenance.filter((m) => !selected.includes(m.id)) }, currentUser, `Deleted ${selected.length} maintenance entry(ies) in bulk`);
+    persist(next);
     showToast(`${selected.length} entry(ies) deleted.`);
     setSelected([]);
   };
 
   const quickStatus = async (id, status) => {
-    persist({ ...data, maintenance: data.maintenance.map((m) => (m.id === id ? { ...m, status } : m)) });
+    const log = data.maintenance.find((m) => m.id === id);
+    const next = withLog({ ...data, maintenance: data.maintenance.map((m) => (m.id === id ? { ...m, status } : m)) }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`);
+    persist(next);
   };
 
   const statusColor = { "Not Started": "#9CA3AF", "In Progress": "#F59E0B", "Done": "#10B981" };
@@ -1250,14 +1289,14 @@ function MaintForm({ entry, assets, onSave, onClose }) {
 /* ---------------------------------------------------------
    Categories View
 --------------------------------------------------------- */
-function CategoriesView({ data, persist, showToast }) {
+function CategoriesView({ data, persist, showToast, currentUser }) {
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const save = async (cat) => {
     let next;
-    if (cat.id) next = { ...data, categories: data.categories.map((c) => (c.id === cat.id ? cat : c)) };
-    else next = { ...data, categories: [...data.categories, { ...cat, id: uid("cat") }] };
+    if (cat.id) next = withLog({ ...data, categories: data.categories.map((c) => (c.id === cat.id ? cat : c)) }, currentUser, `Edited category "${cat.name}"`);
+    else next = withLog({ ...data, categories: [...data.categories, { ...cat, id: uid("cat") }] }, currentUser, `Added category "${cat.name}"`);
     persist(next);
     setEditing(null);
     showToast("Category saved.");
@@ -1270,7 +1309,8 @@ function CategoriesView({ data, persist, showToast }) {
       setConfirmDelete(null);
       return;
     }
-    persist({ ...data, categories: data.categories.filter((c) => c.id !== id) });
+    const cat = data.categories.find((c) => c.id === id);
+    persist(withLog({ ...data, categories: data.categories.filter((c) => c.id !== id) }, currentUser, `Deleted category "${cat?.name}"`));
     setConfirmDelete(null);
     showToast("Category deleted.");
   };
@@ -1335,14 +1375,14 @@ function CategoriesView({ data, persist, showToast }) {
 /* ---------------------------------------------------------
    Locations View
 --------------------------------------------------------- */
-function LocationsView({ data, persist, showToast }) {
+function LocationsView({ data, persist, showToast, currentUser }) {
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const save = async (loc) => {
     let next;
-    if (loc.id) next = { ...data, locations: data.locations.map((l) => (l.id === loc.id ? loc : l)) };
-    else next = { ...data, locations: [...data.locations, { ...loc, id: uid("loc") }] };
+    if (loc.id) next = withLog({ ...data, locations: data.locations.map((l) => (l.id === loc.id ? loc : l)) }, currentUser, `Edited location "${loc.name}"`);
+    else next = withLog({ ...data, locations: [...data.locations, { ...loc, id: uid("loc") }] }, currentUser, `Added location "${loc.name}"`);
     persist(next);
     setEditing(null);
     showToast("Location saved.");
@@ -1355,7 +1395,8 @@ function LocationsView({ data, persist, showToast }) {
       setConfirmDelete(null);
       return;
     }
-    persist({ ...data, locations: data.locations.filter((l) => l.id !== id) });
+    const loc = data.locations.find((l) => l.id === id);
+    persist(withLog({ ...data, locations: data.locations.filter((l) => l.id !== id) }, currentUser, `Deleted location "${loc?.name}"`));
     setConfirmDelete(null);
     showToast("Location deleted.");
   };
@@ -1411,33 +1452,35 @@ function emptyUser(locations) {
   return { id: null, name: "", username: "", email: "", position: "", role: "Regional Staff", locationId: locations[0]?.id || "", password: "" };
 }
 
-function UsersView({ data, persist, showToast }) {
+function UsersView({ data, persist, showToast, currentUser }) {
   const [editing, setEditing] = useState(null);
   const [resetTarget, setResetTarget] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const save = async (form) => {
     if (form.id) {
-      const next = { ...data, users: data.users.map((u) => (u.id === form.id ? { ...u, name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId } : u)) };
+      const next = withLog({ ...data, users: data.users.map((u) => (u.id === form.id ? { ...u, name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId } : u)) }, currentUser, `Edited user "${form.name}"`);
       persist(next);
     } else {
       const hash = await sha256(form.password || "changeme123");
       const newUser = { id: uid("usr"), name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId, passwordHash: hash };
-      persist({ ...data, users: [...data.users, newUser] });
+      persist(withLog({ ...data, users: [...data.users, newUser] }, currentUser, `Added user "${newUser.name}" (${newUser.role})`));
     }
     setEditing(null);
     showToast("User saved.");
   };
 
   const remove = async (id) => {
-    persist({ ...data, users: data.users.filter((u) => u.id !== id) });
+    const u = data.users.find((x) => x.id === id);
+    persist(withLog({ ...data, users: data.users.filter((u) => u.id !== id) }, currentUser, `Removed user "${u?.name}"`));
     setConfirmDelete(null);
     showToast("User removed.");
   };
 
   const resetPassword = async (id, newPass) => {
     const hash = await sha256(newPass);
-    persist({ ...data, users: data.users.map((u) => (u.id === id ? { ...u, passwordHash: hash } : u)) });
+    const u = data.users.find((x) => x.id === id);
+    persist(withLog({ ...data, users: data.users.map((u) => (u.id === id ? { ...u, passwordHash: hash } : u)) }, currentUser, `Reset password for "${u?.name}"`));
     setResetTarget(null);
     showToast("Password reset.");
   };
@@ -1568,7 +1611,7 @@ function BackupView({ data, persist, showToast }) {
           setRestoreError("This doesn't look like a valid backup file.");
           return;
         }
-        setPendingRestore(parsed);
+        setPendingRestore({ auditLog: [], ...parsed });
       } catch {
         setRestoreError("Couldn't read that file — make sure it's a backup .json file.");
       }
@@ -1634,6 +1677,81 @@ function BackupView({ data, persist, showToast }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Activity Log
+--------------------------------------------------------- */
+function ActivityLogView({ data }) {
+  const [search, setSearch] = useState("");
+  const [userFilter, setUserFilter] = useState("all");
+
+  const userOptions = useMemo(() => {
+    const names = new Set((data.auditLog || []).map((l) => l.userName));
+    return Array.from(names).sort();
+  }, [data.auditLog]);
+
+  const entries = useMemo(() => {
+    let list = data.auditLog || [];
+    if (userFilter !== "all") list = list.filter((l) => l.userName === userFilter);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter((l) => l.message.toLowerCase().includes(q) || l.userName.toLowerCase().includes(q));
+    }
+    return list;
+  }, [data.auditLog, search, userFilter]);
+
+  const formatWhen = (iso) => {
+    const d = new Date(iso);
+    return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">Activity Log</h2>
+        <div className="view-actions">
+          <div className="search-box">
+            <Search size={14} />
+            <input placeholder="Search activity..." value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
+          <select className="sort-select" value={userFilter} onChange={(e) => setUserFilter(e.target.value)}>
+            <option value="all">All users</option>
+            {userOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <p className="export-hint">
+        Every add, edit, and delete made by any user, most recent first. Only visible to Admins.
+      </p>
+
+      <div className="panel">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style={{ width: 150 }}>When</th>
+                <th style={{ width: 160 }}>User</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.length === 0 ? (
+                <tr><td colSpan={3} className="empty-cell">No activity recorded yet.</td></tr>
+              ) : entries.map((l) => (
+                <tr key={l.id}>
+                  <td className="mono">{formatWhen(l.at)}</td>
+                  <td>{l.userName}</td>
+                  <td>{l.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

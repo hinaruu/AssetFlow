@@ -29,7 +29,9 @@ export async function fetchOrgData() {
     .maybeSingle();
 
   if (error) throw error;
-  return data?.payload || null;
+  if (!data?.payload) return null;
+  // Backward compatibility: older saved data won't have an auditLog yet.
+  return { auditLog: [], ...data.payload };
 }
 
 /**
