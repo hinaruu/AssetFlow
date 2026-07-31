@@ -466,6 +466,9 @@ export default function App() {
             {view === "users" && isAdmin && (
               <UsersView data={data} persist={persist} showToast={showToast} />
             )}
+            {view === "backup" && isAdmin && (
+              <BackupView data={data} persist={persist} showToast={showToast} />
+            )}
           </div>
         </div>
       </div>
@@ -486,6 +489,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin }) {
       { id: "categories", label: "Categories", icon: Tags },
       { id: "locations", label: "Locations", icon: MapPin },
       { id: "users", label: "User Accounts", icon: Users },
+      { id: "backup", label: "Backup & Restore", icon: Download },
     ] : []),
   ];
   return (
@@ -1523,6 +1527,112 @@ function UsersView({ data, persist, showToast }) {
       )}
       {confirmDelete && (
         <ConfirmDialog message="Remove this user's access?" onCancel={() => setConfirmDelete(null)} onConfirm={() => remove(confirmDelete)} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Backup & Restore
+--------------------------------------------------------- */
+function BackupView({ data, persist, showToast }) {
+  const inputRef = React.useRef(null);
+  const [pendingRestore, setPendingRestore] = useState(null); // parsed JSON awaiting confirm
+  const [restoreError, setRestoreError] = useState("");
+
+  const downloadBackup = () => {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.href = url;
+    a.download = `asset-manager-backup-${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast("Backup downloaded.");
+  };
+
+  const triggerRestore = () => inputRef.current?.click();
+
+  const handleFile = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setRestoreError("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result));
+        if (!parsed || !Array.isArray(parsed.assets) || !Array.isArray(parsed.locations)) {
+          setRestoreError("This doesn't look like a valid backup file.");
+          return;
+        }
+        setPendingRestore(parsed);
+      } catch {
+        setRestoreError("Couldn't read that file — make sure it's a backup .json file.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const confirmRestore = async () => {
+    await persist(pendingRestore);
+    setPendingRestore(null);
+    showToast("Data restored from backup.");
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">Backup &amp; Restore</h2>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>Download a Backup</h3></div>
+        <div style={{ padding: "18px" }}>
+          <p className="login-sub" style={{ margin: "0 0 14px" }}>
+            Saves everything — assets, categories, locations, users, and maintenance
+            records — as one file on your device. The shared database has no automatic
+            backups, so it's worth doing this occasionally.
+          </p>
+          <button className="btn primary" onClick={downloadBackup}>
+            <Download size={14} /> Download Backup (.json)
+          </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>Restore from a Backup</h3></div>
+        <div style={{ padding: "18px" }}>
+          <p className="login-sub" style={{ margin: "0 0 14px" }}>
+            This replaces <strong>all</strong> current data — everyone's data — with
+            what's in the file you choose. Use this to undo a mistake or recover from
+            a lost project.
+          </p>
+          <input ref={inputRef} type="file" accept=".json" style={{ display: "none" }} onChange={handleFile} />
+          <button className="btn ghost" onClick={triggerRestore}>
+            <Upload size={14} /> Choose Backup File
+          </button>
+          {restoreError && <div className="form-error" style={{ marginTop: 12 }}>{restoreError}</div>}
+        </div>
+      </div>
+
+      {pendingRestore && (
+        <div className="modal-overlay">
+          <div className="modal confirm">
+            <div className="confirm-icon"><AlertTriangle size={20} /></div>
+            <h3>Replace all current data?</h3>
+            <p className="login-sub">
+              This will overwrite the live data for every user with the contents of
+              this backup file. This can't be undone unless you have another backup.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn ghost" onClick={() => setPendingRestore(null)}>Cancel</button>
+              <button className="btn danger" onClick={confirmRestore}>Yes, Restore</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
