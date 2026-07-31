@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
   ChevronLeft, ChevronRight, KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
-  Undo2, Bell, Copy, Truck,
+  Bell, Copy, Truck,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { fetchOrgData, saveOrgData } from "./lib/supabase.js";
@@ -81,6 +81,7 @@ const STATUS_COLORS = {
   "Retired": "#9CA3AF",
   "Disposed": "#EF4444",
 };
+const STATUS_OPTIONS = Object.keys(STATUS_COLORS);
 const CAT_PALETTE = ["#6366F1", "#10B981", "#F59E0B", "#EC4899", "#06B6D4", "#8B5CF6", "#84CC16", "#F97316"];
 
 function seedData() {
@@ -336,7 +337,6 @@ export default function App() {
   const [connectionError, setConnectionError] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
-  const [historyStack, setHistoryStack] = useState([]); // snapshots for Undo
   const dataRef = React.useRef(null);
   useEffect(() => { dataRef.current = data; }, [data]);
 
@@ -393,7 +393,6 @@ export default function App() {
 
   // Save org data to the shared database whenever it changes locally
   const persist = useCallback(async (next) => {
-    setHistoryStack((h) => [dataRef.current, ...h].slice(0, 15));
     setData(next);
     try {
       await saveOrgData(next);
@@ -402,22 +401,6 @@ export default function App() {
       showToast("Could not save — check your connection and try again.");
     }
   }, [showToast]);
-
-  // Reverts to the state immediately before the last save (assets, categories,
-  // locations, maintenance, users — everything persist() touches).
-  const undoLast = useCallback(async () => {
-    const [last, ...rest] = historyStack;
-    if (!last) { showToast("Nothing to undo."); return; }
-    setHistoryStack(rest);
-    setData(last);
-    try {
-      await saveOrgData(last);
-      setLastSynced(new Date());
-      showToast("Last action undone.");
-    } catch {
-      showToast("Undo failed to save — check your connection.");
-    }
-  }, [historyStack, showToast]);
 
   // Manually pull the latest data from the shared database
   const syncNow = useCallback(async () => {
@@ -523,8 +506,6 @@ export default function App() {
             syncing={syncing}
             lastSynced={lastSynced}
             data={data}
-            canUndo={historyStack.length > 0}
-            onUndo={undoLast}
           />
           <div className="content">
             {view === "dashboard" && (
@@ -587,40 +568,43 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
     ] : []),
   ];
   return (
-    <div className={`sidebar ${open ? "" : "collapsed"}`}>
-      <div className="sidebar-top">
-        {open && <div className="brand"><ShieldCheck size={18} /><span>AssetFlow</span></div>}
-        {!open && <div className="brand-mini"><ShieldCheck size={18} /></div>}
-        <button className="icon-btn" onClick={onToggle} title="Toggle menu">
-          {open ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
-        </button>
-      </div>
-      <nav>
-        {items.map((it) => (
-          <button
-            key={it.id}
-            className={`nav-item ${view === it.id ? "active" : ""}`}
-            onClick={() => setView(it.id)}
-            title={it.label}
-          >
-            <it.icon size={17} />
-            {open && <span>{it.label}</span>}
-            {!!it.badge && (
-              <span style={{ marginLeft: "auto", background: "#EF4444", color: "white", borderRadius: 999, fontSize: 11, fontWeight: 700, padding: "1px 7px" }}>
-                {it.badge}
-              </span>
-            )}
+    <>
+      {open && <div className="sidebar-backdrop" onClick={onToggle} />}
+      <div className={`sidebar ${open ? "" : "collapsed"}`}>
+        <div className="sidebar-top">
+          {open && <div className="brand"><ShieldCheck size={18} /><span>AssetFlow</span></div>}
+          {!open && <div className="brand-mini"><ShieldCheck size={18} /></div>}
+          <button className="icon-btn" onClick={onToggle} title="Toggle menu">
+            {open ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
           </button>
-        ))}
-      </nav>
-    </div>
+        </div>
+        <nav>
+          {items.map((it) => (
+            <button
+              key={it.id}
+              className={`nav-item ${view === it.id ? "active" : ""}`}
+              onClick={() => { setView(it.id); if (window.innerWidth <= 860) onToggle(); }}
+              title={it.label}
+            >
+              <it.icon size={17} />
+              {open && <span>{it.label}</span>}
+              {!!it.badge && (
+                <span style={{ marginLeft: "auto", background: "#EF4444", color: "white", borderRadius: 999, fontSize: 11, fontWeight: 700, padding: "1px 7px" }}>
+                  {it.badge}
+                </span>
+              )}
+            </button>
+          ))}
+        </nav>
+      </div>
+    </>
   );
 }
 
 /* ---------------------------------------------------------
    Top Bar
 --------------------------------------------------------- */
-function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, canUndo, onUndo }) {
+function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, onToggleSidebar }) {
   const [notifOpen, setNotifOpen] = useState(false);
   const isAdmin = currentUser.role === "Admin";
   const locName = scopedLocationId
@@ -637,15 +621,15 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   return (
     <div className="topbar">
       <div className="topbar-left">
+        <button className="icon-btn mobile-menu-btn" onClick={onToggleSidebar} title="Menu">
+          <Menu size={16} />
+        </button>
         <span className="topbar-region"><MapPin size={13} /> {locName}</span>
       </div>
       <div className="topbar-right">
-        {syncedLabel && <span className="user-role" style={{ marginRight: 2 }}>{syncedLabel}</span>}
+        {syncedLabel && <span className="user-role synced-label" style={{ marginRight: 2 }}>{syncedLabel}</span>}
         <button className="icon-btn" onClick={onSync} title="Sync with latest data" disabled={syncing}>
           <RefreshCw size={16} className={syncing ? "spin" : ""} />
-        </button>
-        <button className="icon-btn" onClick={onUndo} title={canUndo ? "Undo last action" : "Nothing to undo"} disabled={!canUndo}>
-          <Undo2 size={16} />
         </button>
         <div className="notif-wrap">
           <button className="icon-btn" onClick={() => setNotifOpen((o) => !o)} title="Notifications">
@@ -761,11 +745,11 @@ function Dashboard({ data, scopedLocationId }) {
                 const loc = data.locations.find((l) => l.id === a.locationId);
                 return (
                   <tr key={a.id}>
-                    <td className="mono">{a.tag}</td>
-                    <td>{a.name}</td>
-                    <td>{cat?.name || "—"}</td>
-                    <td>{loc?.name || "—"}</td>
-                    <td><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
+                    <td className="mono" data-label="Asset Tag">{a.tag}</td>
+                    <td data-label="Name">{a.name}</td>
+                    <td data-label="Category">{cat?.name || "—"}</td>
+                    <td data-label="Location">{loc?.name || "—"}</td>
+                    <td data-label="Status"><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
                   </tr>
                 );
               })}
@@ -846,6 +830,8 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [exportText, setExportText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
+  const [transferNewLocationName, setTransferNewLocationName] = useState("");
+  const [transferAssignedTo, setTransferAssignedTo] = useState("");
   const [transferReason, setTransferReason] = useState("");
   const fileInputRef = React.useRef(null);
 
@@ -949,35 +935,57 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const startTransfer = (asset) => {
     setTransferTarget(asset.id);
     setTransferLocationId("");
+    setTransferNewLocationName("");
+    setTransferAssignedTo(asset.assignedTo || "");
     setTransferReason("");
   };
 
   const submitTransfer = () => {
+    const creatingLocation = transferLocationId === "__new__";
     if (!transferLocationId) { alert("Please select a destination location."); return; }
+    if (creatingLocation && !transferNewLocationName.trim()) { alert("Please enter a name for the new location."); return; }
     if (!transferReason.trim()) { alert("Please enter a reason for this transfer."); return; }
     const asset = data.assets.find((a) => a.id === transferTarget);
     if (!asset) return;
+
+    let locations = data.locations;
+    let destLocationId = transferLocationId;
+    if (creatingLocation) {
+      const newLoc = { id: uid("loc"), name: transferNewLocationName.trim() };
+      locations = [...data.locations, newLoc];
+      destLocationId = newLoc.id;
+    }
+
     const fromLoc = data.locations.find((l) => l.id === asset.locationId)?.name || "Unknown";
-    const toLoc = data.locations.find((l) => l.id === transferLocationId)?.name || "Unknown";
+    const toLoc = locations.find((l) => l.id === destLocationId)?.name || "Unknown";
+    const newAssignedTo = transferAssignedTo.trim();
+    const assignedChanged = newAssignedTo !== (asset.assignedTo || "");
+
     const transferEntry = {
       id: uid("xfer"),
       fromLocationId: asset.locationId,
       fromLocationName: fromLoc,
-      toLocationId: transferLocationId,
+      toLocationId: destLocationId,
       toLocationName: toLoc,
       reason: transferReason.trim(),
       by: currentUser.name,
       at: new Date().toISOString(),
     };
+    const logBits = [`Transferred asset "${asset.name || asset.tag}" from ${fromLoc} to ${toLoc}`];
+    if (assignedChanged) logBits.push(`reassigned to ${newAssignedTo || "Unassigned"}`);
+    logBits.push(`reason: ${transferReason.trim()}`);
+
     const next = withLog({
       ...data,
+      locations,
       assets: data.assets.map((a) => (a.id === transferTarget
-        ? { ...a, locationId: transferLocationId, transferHistory: [transferEntry, ...(a.transferHistory || [])] }
+        ? { ...a, locationId: destLocationId, assignedTo: newAssignedTo, transferHistory: [transferEntry, ...(a.transferHistory || [])] }
         : a)),
-    }, currentUser, `Transferred asset "${asset.name || asset.tag}" from ${fromLoc} to ${toLoc} — reason: ${transferReason.trim()}`);
+    }, currentUser, logBits.join(" — "));
     persist(next);
     setTransferTarget(null);
     setTransferReason("");
+    setTransferNewLocationName("");
     showToast("Asset transferred.");
   };
 
@@ -1168,19 +1176,18 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                 <th>Assigned User</th>
                 <th>Status</th>
                 <th>Condition</th>
-                <th style={{ width: 90 }}></th>
               </tr>
             </thead>
             <tbody>
               {visibleAssets.length === 0 && (
-                <tr><td colSpan={9} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
+                <tr><td colSpan={8} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
               )}
               {visibleAssets.map((a) => {
                 const cat = data.categories.find((c) => c.id === a.categoryId);
                 const loc = data.locations.find((l) => l.id === a.locationId);
                 return (
                   <tr key={a.id}>
-                    <td>
+                    <td className="checkbox-cell">
                       <input
                         type="checkbox"
                         checked={selected.includes(a.id)}
@@ -1189,14 +1196,14 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                         }
                       />
                     </td>
-                    <td>
-                      <button className="link-tag" onClick={() => setViewing(a)} title="View details">{a.tag}</button>
+                    <td data-label="Asset Tag">
+                      <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
                     </td>
-                    <td>{a.name}</td>
-                    <td>{cat?.name || "—"}</td>
-                    <td>{loc?.name || "—"}</td>
-                    <td>{a.assignedTo || "—"}</td>
-                    <td>
+                    <td data-label="Name">{a.name}</td>
+                    <td data-label="Category">{cat?.name || "—"}</td>
+                    <td data-label="Location">{loc?.name || "—"}</td>
+                    <td data-label="Assigned User">{a.assignedTo || "—"}</td>
+                    <td data-label="Status">
                       <Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge>
                       {a.pendingDeletion && (
                         <div style={{ marginTop: 4 }}>
@@ -1204,20 +1211,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                         </div>
                       )}
                     </td>
-                    <td>{a.condition}</td>
-                    <td>
-                      <div className="row-actions">
-                        <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(a)} />
-                        <IconBtn icon={Copy} title="Duplicate" onClick={() => duplicateAsset(a)} />
-                        <IconBtn icon={Truck} title="Transfer to another location" onClick={() => startTransfer(a)} />
-                        <IconBtn
-                          icon={Trash2}
-                          title={!isAdmin && a.pendingDeletion ? "Awaiting Admin approval" : "Delete"}
-                          danger
-                          onClick={() => startDelete(a)}
-                        />
-                      </div>
-                    </td>
+                    <td data-label="Condition">{a.condition}</td>
                   </tr>
                 );
               })}
@@ -1280,9 +1274,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           asset={viewing}
           categories={data.categories}
           locations={data.locations}
+          isAdmin={isAdmin}
           onClose={() => setViewing(null)}
           onEdit={() => { setEditing(viewing); setViewing(null); }}
+          onDuplicate={() => { duplicateAsset(viewing); setViewing(null); }}
           onTransfer={() => { startTransfer(viewing); setViewing(null); }}
+          onDelete={() => { setViewing(null); startDelete(viewing); }}
         />
       )}
       {transferTarget && (
@@ -1298,12 +1295,33 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                   {data.locations.filter((l) => l.id !== data.assets.find((a) => a.id === transferTarget)?.locationId).map((l) => (
                     <option key={l.id} value={l.id}>{l.name}</option>
                   ))}
+                  <option value="__new__">+ Add new location…</option>
                 </select>
+              </Field>
+            </div>
+            {transferLocationId === "__new__" && (
+              <div className="form-full">
+                <Field label="New Location Name">
+                  <input value={transferNewLocationName} onChange={(e) => setTransferNewLocationName(e.target.value)} placeholder="e.g. Cebu Branch" autoFocus />
+                </Field>
+              </div>
+            )}
+            <div className="form-full">
+              <Field label="Assign To (optional)">
+                <input
+                  list="transfer-assigned-user-list"
+                  value={transferAssignedTo}
+                  onChange={(e) => setTransferAssignedTo(e.target.value)}
+                  placeholder="Keep current user, or type a new one"
+                />
+                <datalist id="transfer-assigned-user-list">
+                  {assignedUserOptions.map((u) => <option key={u} value={u} />)}
+                </datalist>
               </Field>
             </div>
             <div className="form-full">
               <Field label="Reason for transfer">
-                <textarea value={transferReason} onChange={(e) => setTransferReason(e.target.value)} rows={3} placeholder='e.g. "Shipped to Philippines for new hire"' autoFocus />
+                <textarea value={transferReason} onChange={(e) => setTransferReason(e.target.value)} rows={3} placeholder='e.g. "Shipped to Philippines for new hire"' />
               </Field>
             </div>
             <div className="form-full modal-actions">
@@ -1415,7 +1433,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, onClose, onEdit, onTransfer }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const row = (label, value) => (
@@ -1456,10 +1474,22 @@ function AssetDetailModal({ asset, categories, locations, onClose, onEdit, onTra
         </div>
       )}
 
-      <div className="modal-actions" style={{ marginTop: 16 }}>
-        <button type="button" className="btn ghost" onClick={onClose}>Close</button>
+      <div className="modal-actions" style={{ marginTop: 16, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="btn ghost danger"
+          onClick={onDelete}
+          title={!isAdmin && asset.pendingDeletion ? "Awaiting Admin approval" : "Delete"}
+          disabled={!isAdmin && !!asset.pendingDeletion}
+        >
+          <Trash2 size={14} /> Delete
+        </button>
+        <button type="button" className="btn ghost" onClick={onDuplicate}><Copy size={14} /> Duplicate</button>
         <button type="button" className="btn ghost" onClick={onTransfer}><Truck size={14} /> Transfer</button>
         <button type="button" className="btn primary" onClick={onEdit}><Pencil size={14} /> Edit</button>
+      </div>
+      <div className="modal-actions" style={{ marginTop: 8 }}>
+        <button type="button" className="btn ghost" onClick={onClose} style={{ width: "100%", justifyContent: "center" }}>Close</button>
       </div>
     </Modal>
   );
@@ -1559,18 +1589,18 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
                 const asset = data.assets.find((a) => a.id === m.assetId);
                 return (
                   <tr key={m.id}>
-                    <td>
+                    <td className="checkbox-cell">
                       <input
                         type="checkbox"
                         checked={selected.includes(m.id)}
                         onChange={(e) => setSelected((s) => (e.target.checked ? [...s, m.id] : s.filter((x) => x !== m.id)))}
                       />
                     </td>
-                    <td className="mono">{asset?.tag || "—"}</td>
-                    <td>{m.description}</td>
-                    <td>{m.date}</td>
-                    <td>{m.cost ? `$${m.cost}` : "—"}</td>
-                    <td>
+                    <td className="mono" data-label="Asset">{asset?.tag || "—"}</td>
+                    <td data-label="Description">{m.description}</td>
+                    <td data-label="Date">{m.date}</td>
+                    <td data-label="Cost">{m.cost ? `$${m.cost}` : "—"}</td>
+                    <td data-label="Status">
                       <select
                         className="status-select"
                         value={m.status}
@@ -1580,7 +1610,7 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
                         {MAINT_STATUS.map((s) => <option key={s} value={s}>{s}</option>)}
                       </select>
                     </td>
-                    <td>
+                    <td className="actions-cell">
                       <div className="row-actions">
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(m)} />
                         <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(m.id)} />
@@ -1686,10 +1716,10 @@ function CategoriesView({ data, persist, showToast, currentUser }) {
             <tbody>
               {data.categories.map((c) => (
                 <tr key={c.id}>
-                  <td>{c.name}</td>
-                  <td><Badge color={c.type === "IT" ? "#6366F1" : "#F59E0B"}>{c.type}</Badge></td>
-                  <td>{c.usefulLife}</td>
-                  <td>
+                  <td data-label="Name">{c.name}</td>
+                  <td data-label="Type"><Badge color={c.type === "IT" ? "#6366F1" : "#F59E0B"}>{c.type}</Badge></td>
+                  <td data-label="Useful Life (yrs)">{c.usefulLife}</td>
+                  <td className="actions-cell">
                     <div className="row-actions">
                       <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(c)} />
                       <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(c.id)} />
@@ -1770,8 +1800,8 @@ function LocationsView({ data, persist, showToast, currentUser }) {
             <tbody>
               {data.locations.map((l) => (
                 <tr key={l.id}>
-                  <td>{l.name}</td>
-                  <td>
+                  <td data-label="Name">{l.name}</td>
+                  <td className="actions-cell">
                     <div className="row-actions">
                       <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(l)} />
                       <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(l.id)} />
@@ -1856,12 +1886,12 @@ function UsersView({ data, persist, showToast, currentUser }) {
                 const loc = data.locations.find((l) => l.id === u.locationId);
                 return (
                   <tr key={u.id}>
-                    <td>{u.name}</td>
-                    <td>{u.position || "—"}</td>
-                    <td className="mono">{u.username}</td>
-                    <td><Badge color={u.role === "Admin" ? "#6366F1" : "#10B981"}>{u.role}</Badge></td>
-                    <td>{loc?.name || "— (Global)"}</td>
-                    <td>
+                    <td data-label="Name">{u.name}</td>
+                    <td data-label="Position">{u.position || "—"}</td>
+                    <td className="mono" data-label="Username">{u.username}</td>
+                    <td data-label="Role"><Badge color={u.role === "Admin" ? "#6366F1" : "#10B981"}>{u.role}</Badge></td>
+                    <td data-label="Location">{loc?.name || "— (Global)"}</td>
+                    <td className="actions-cell">
                       <div className="row-actions">
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing({ ...u })} />
                         <IconBtn icon={KeyRound} title="Reset Password" onClick={() => setResetTarget(u.id)} />
@@ -2281,13 +2311,16 @@ function GlobalStyles() {
       .nav-item.active { background: var(--accent-soft); color: var(--accent); }
 
       .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-      .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
-      .topbar-region { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-soft); background: var(--bg); padding: 6px 12px; border-radius: 999px; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--surface); gap: 10px; }
+      .topbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      .topbar-region { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-soft); background: var(--bg); padding: 6px 12px; border-radius: 999px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .topbar-right { display: flex; align-items: center; gap: 10px; }
+      .mobile-menu-btn { display: none; flex-shrink: 0; }
       .user-chip { display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 999px; background: var(--bg); }
-      .avatar { width: 28px; height: 28px; border-radius: 999px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+      .avatar { width: 28px; height: 28px; border-radius: 999px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
       .user-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; }
       .user-role { font-size: 11px; color: var(--text-soft); }
+      .sidebar-backdrop { display: none; }
 
       .link-tag { background: none; border: none; padding: 0; font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
       .link-tag:hover { opacity: 0.8; }
@@ -2396,13 +2429,60 @@ function GlobalStyles() {
       @keyframes modalIn { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 
       @media (max-width: 860px) {
-        .sidebar { position: fixed; z-index: 40; height: 100vh; }
-        .sidebar:not(.collapsed) { width: 220px; }
-        .metrics-row { grid-template-columns: repeat(2, 1fr); }
+        .mobile-menu-btn { display: flex; }
+        .sidebar { position: fixed; z-index: 70; height: 100vh; top: 0; left: 0; width: 240px; transform: translateX(-100%); box-shadow: 0 0 0 rgba(0,0,0,0); transition: transform 0.2s ease; }
+        .sidebar:not(.collapsed) { transform: translateX(0); box-shadow: 12px 0 32px rgba(0,0,0,0.18); }
+        .sidebar.collapsed { width: 240px; }
+        .sidebar.collapsed .sidebar-top button.icon-btn { display: none; }
+        .sidebar-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 65; }
+        .main { width: 100%; }
+        .content { padding: 14px; }
+        .topbar { padding: 10px 12px; }
+        .topbar-region span { display: none; }
+        .synced-label { display: none; }
+        .user-meta { display: none; }
+        .user-chip { padding: 4px; }
+        .metrics-row { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .metric { padding: 12px 14px; }
+        .metric-value { font-size: 21px; }
         .charts-row { grid-template-columns: 1fr; }
         .form-grid { grid-template-columns: 1fr; }
         .search-box { width: 100%; }
         .view-head { flex-direction: column; align-items: stretch; }
+        .view-actions { flex-wrap: wrap; }
+        .view-actions .btn { flex: 1; justify-content: center; }
+        .modal-overlay { padding: 0; align-items: flex-end; }
+        .modal { max-width: 100% !important; width: 100%; max-height: 92vh; border-radius: 16px 16px 0 0; }
+        .notif-panel { width: calc(100vw - 24px); right: -12px; }
+
+        /* Card-style tables: each row becomes a stacked card */
+        .table-wrap table, .table-wrap thead, .table-wrap tbody, .table-wrap th, .table-wrap td, .table-wrap tr {
+          display: block;
+        }
+        .table-wrap thead { position: absolute; top: -9999px; left: -9999px; }
+        .table-wrap tbody tr {
+          background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+          margin-bottom: 10px; padding: 4px 12px;
+        }
+        .table-wrap tbody tr:last-child { margin-bottom: 0; }
+        .table-wrap td {
+          display: flex; align-items: center; justify-content: space-between; gap: 10px;
+          padding: 8px 0; border-bottom: 1px solid var(--border); white-space: normal; text-align: right;
+        }
+        .table-wrap td:last-child { border-bottom: none; }
+        .table-wrap td[data-label]::before {
+          content: attr(data-label); font-size: 11px; font-weight: 700; text-transform: uppercase;
+          letter-spacing: 0.03em; color: var(--text-soft); text-align: left; margin-right: 10px;
+        }
+        .table-wrap td:not([data-label]) { justify-content: flex-end; }
+        .table-wrap td.checkbox-cell { justify-content: flex-start; }
+        .table-wrap td.actions-cell { justify-content: flex-end; }
+        .row-actions { flex-wrap: wrap; justify-content: flex-end; }
+      }
+
+      @media (max-width: 480px) {
+        .metrics-row { grid-template-columns: 1fr 1fr; }
+        .login-card { width: 100%; padding: 24px; }
       }
     `}</style>
   );
