@@ -1,0 +1,1697 @@
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
+  Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
+  ChevronLeft, ChevronRight, KeyRound, ShieldCheck, AlertTriangle, RefreshCw
+} from "lucide-react";
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
+import { fetchOrgData, saveOrgData } from "./lib/supabase.js";
+
+/* ---------------------------------------------------------
+   Helpers
+--------------------------------------------------------- */
+// Synchronous string hash (cyrb53) — used instead of the Web Crypto API,
+// which is unreliable inside sandboxed artifact preview environments.
+function sha256(text) {
+  const str = String(text ?? "");
+  let h1 = 0xdeadbeef ^ 0, h2 = 0x41c6ce57 ^ 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+const uid = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const todayISO = () => new Date().toISOString().split("T")[0];
+
+const STATUS_OPTIONS = ["In Stock", "In Use", "Under Repair", "Retired", "Disposed"];
+const CONDITION_OPTIONS = ["New", "Good", "Fair", "Poor"];
+const MAINT_STATUS = ["Not Started", "In Progress", "Done"];
+
+const STATUS_COLORS = {
+  "In Stock": "#3B82F6",
+  "In Use": "#10B981",
+  "Under Repair": "#F59E0B",
+  "Retired": "#9CA3AF",
+  "Disposed": "#EF4444",
+};
+const CAT_PALETTE = ["#6366F1", "#10B981", "#F59E0B", "#EC4899", "#06B6D4", "#8B5CF6", "#84CC16", "#F97316"];
+
+function seedData() {
+  const locations = [
+    { id: "loc-main", name: "Main Office" },
+  ];
+  const categories = [
+    { id: "cat-laptop", name: "Laptops & Desktops", type: "IT", usefulLife: 3 },
+    { id: "cat-server", name: "Servers & Storage", type: "IT", usefulLife: 5 },
+    { id: "cat-network", name: "Network Equipment", type: "IT", usefulLife: 4 },
+    { id: "cat-software", name: "Software & Licenses", type: "IT", usefulLife: 1 },
+    { id: "cat-monitor", name: "Monitors & Displays", type: "IT", usefulLife: 4 },
+    { id: "cat-furniture", name: "Office Furniture", type: "Non-IT", usefulLife: 7 },
+    { id: "cat-tools", name: "Tools & Testing Equipment", type: "Non-IT", usefulLife: 5 },
+  ];
+  const assets = generateMockAssets(locations, categories);
+  return { locations, categories, assets, maintenance: generateMockMaintenance(assets), users: [] };
+}
+
+const SAMPLE_STAFF = [
+  "Maria Santos", "Wei Chen", "Li Na", "Tan Wei Ling", "Chan Ka Wai", "Jose Reyes",
+  "Grace Tan", "Arman Cruz", "Huang Yi", "Sofia Lim", "Marco Villanueva", "Priya Rao",
+  "Daniel Ong", "Faith Aquino", "Kenji Sato", "Emily Wong", "Ryan Dela Cruz", "Zhang Wei",
+  "Hannah Goh", "Carlos Mendoza",
+];
+
+const IT_MODELS = {
+  "cat-laptop": [["Lenovo", "ThinkPad X1 Carbon"], ["Dell", "Latitude 5440"], ["Apple", "MacBook Pro 14"], ["HP", "EliteBook 840"], ["Lenovo", "ThinkPad T14"]],
+  "cat-server": [["Dell", "PowerEdge R450"], ["HPE", "ProLiant DL360"], ["Lenovo", "ThinkSystem SR630"]],
+  "cat-network": [["Cisco", "Catalyst 1200"], ["Ubiquiti", "UniFi Switch 24"], ["TP-Link", "T2600G-28TS"]],
+  "cat-software": [["Microsoft", "Office 365 E3"], ["Adobe", "Creative Cloud"], ["Autodesk", "AutoCAD LT"]],
+  "cat-monitor": [["Dell", "P2422H"], ["LG", "27UL850"], ["Samsung", "S24C450"]],
+};
+const NONIT_MODELS = {
+  "cat-furniture": [["Herman Miller", "Aeron Chair"], ["IKEA", "Bekant Desk"], ["Steelcase", "Series 2"]],
+  "cat-tools": [["Mitutoyo", "Digital Caliper 500-196"], ["Fluke", "179 Multimeter"], ["Bosch", "GLM 50C Laser Meter"]],
+};
+
+function generateMockAssets(locations, categories) {
+  const assets = [];
+  let counter = 1;
+  const totalTarget = 130;
+  const itCats = categories.filter((c) => c.type === "IT").map((c) => c.id);
+  const nonItCats = categories.filter((c) => c.type === "Non-IT").map((c) => c.id);
+
+  for (let i = 0; i < totalTarget; i++) {
+    const loc = locations[i % locations.length];
+    const isIT = i % 5 !== 0; // ~80% IT, 20% Non-IT
+    const catId = isIT ? itCats[i % itCats.length] : nonItCats[i % nonItCats.length];
+    const models = isIT ? IT_MODELS[catId] : NONIT_MODELS[catId];
+    const [brand, model] = models[i % models.length];
+    const status = STATUS_OPTIONS[i % STATUS_OPTIONS.length];
+    const condition = CONDITION_OPTIONS[(i + 1) % CONDITION_OPTIONS.length];
+    const assignedTo = status === "In Use" ? SAMPLE_STAFF[i % SAMPLE_STAFF.length] : "";
+    const year = 2022 + (i % 4);
+    const month = String(1 + (i % 12)).padStart(2, "0");
+    const day = String(1 + (i % 27)).padStart(2, "0");
+    const purchaseDate = `${year}-${month}-${day}`;
+    const cost = isIT ? 400 + (i % 12) * 350 : 80 + (i % 10) * 120;
+    const locCode = loc.name.slice(0, 2).toUpperCase();
+
+    assets.push({
+      id: uid("ast"),
+      tag: `AST-${locCode}-${String(counter++).padStart(3, "0")}`,
+      name: `${model}`,
+      categoryId: catId,
+      assetType: isIT ? "IT" : "Non-IT",
+      brand, model,
+      serial: `SN-${100000 + i * 37}`,
+      status, condition,
+      locationId: loc.id,
+      assignedTo,
+      purchaseDate,
+      purchaseCost: cost,
+      warrantyExpiry: isIT ? `${year + 3}-${month}-${day}` : "",
+      calibrationDate: !isIT ? `2026-${String(1 + ((i + 3) % 12)).padStart(2, "0")}-15` : "",
+      notes: status === "Under Repair" ? "Reported issue — pending technician review" : "",
+    });
+  }
+  return assets;
+}
+
+function generateMockMaintenance(assets) {
+  const logs = [];
+  const descriptions = [
+    "Routine inspection and cleaning",
+    "Battery replacement",
+    "Firmware/software update",
+    "Hardware fault diagnosis",
+    "Annual calibration check",
+    "Screen/display repair",
+    "Network connectivity issue",
+  ];
+  const sample = assets.filter((_, i) => i % 9 === 0).slice(0, 14);
+  sample.forEach((a, i) => {
+    logs.push({
+      id: uid("maint"),
+      assetId: a.id,
+      description: descriptions[i % descriptions.length],
+      cost: 20 + (i % 8) * 35,
+      date: a.purchaseDate,
+      status: MAINT_STATUS[i % MAINT_STATUS.length],
+    });
+  });
+  return logs;
+}
+
+/* ---------------------------------------------------------
+   Small UI atoms
+--------------------------------------------------------- */
+function Badge({ children, color }) {
+  return (
+    <span
+      className="badge"
+      style={{
+        background: `${color}1a`,
+        color,
+        border: `1px solid ${color}40`,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function IconBtn({ icon: Icon, onClick, title, danger }) {
+  return (
+    <button className={`icon-btn ${danger ? "danger" : ""}`} onClick={onClick} title={title} type="button">
+      <Icon size={15} />
+    </button>
+  );
+}
+
+function Modal({ title, onClose, children, width = 480 }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{ maxWidth: width }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{title}</h3>
+          <button className="icon-btn" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({ message, onCancel, onConfirm }) {
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal confirm" onClick={(e) => e.stopPropagation()}>
+        <div className="confirm-icon"><AlertTriangle size={20} /></div>
+        <p>{message}</p>
+        <div className="confirm-actions">
+          <button className="btn ghost" onClick={onCancel}>Cancel</button>
+          <button className="btn danger" onClick={onConfirm}>Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/* ---------------------------------------------------------
+   Login Screen
+--------------------------------------------------------- */
+function LoginScreen({ users, onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      if (!username.trim() || !password) {
+        setError("Enter both username and password.");
+        return;
+      }
+      const hash = sha256(password);
+      const list = Array.isArray(users) ? users : [];
+      const found = list.find(
+        (u) => (u.username || "").toLowerCase() === username.trim().toLowerCase() && u.passwordHash === hash
+      );
+      if (!found) {
+        setError("Incorrect username or password.");
+        return;
+      }
+      onLogin(found);
+    } catch (err) {
+      setError("Something went wrong signing in. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-card">
+        <div className="login-logo">
+          <ShieldCheck size={22} />
+          <span>AssetFlow</span>
+        </div>
+        <p className="login-sub">Sign in to manage IT &amp; facility assets.</p>
+        <div onKeyDown={(e) => { if (e.key === "Enter") submit(e); }}>
+          <Field label="Username">
+            <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus placeholder="e.g. admin" />
+          </Field>
+          <Field label="Password">
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+          </Field>
+          {error && <div className="form-error">{error}</div>}
+          <button className="btn primary full" disabled={busy} type="button" onClick={submit}>
+            {busy ? "Signing in…" : "Sign In"}
+          </button>
+        </div>
+        <div className="login-hint">
+          Demo admin login — <strong>admin</strong> / <strong>admin123</strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Main App
+--------------------------------------------------------- */
+export default function App() {
+  const [loaded, setLoaded] = useState(false);
+  const [theme, setTheme] = useState("light");
+  const [data, setData] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [view, setView] = useState("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [toast, setToast] = useState(null); // { message, phase: 'in' | 'out' }
+  const [connectionError, setConnectionError] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSynced, setLastSynced] = useState(null);
+
+  const showToast = useCallback((msg) => {
+    setToast({ message: msg, phase: "in" });
+    window.clearTimeout(showToast._hideTimer);
+    window.clearTimeout(showToast._clearTimer);
+    showToast._hideTimer = window.setTimeout(() => {
+      setToast((t) => (t ? { ...t, phase: "out" } : t));
+      showToast._clearTimer = window.setTimeout(() => setToast(null), 220);
+    }, 1800);
+  }, []);
+
+  const loadFromCloud = useCallback(async ({ seedIfEmpty }) => {
+    let orgData = null;
+    orgData = await fetchOrgData(); // throws if offline / misconfigured
+
+    if (!orgData) {
+      if (!seedIfEmpty) return null;
+      orgData = seedData();
+      const adminHash = sha256("admin123");
+      const staffHash = sha256("hr12345");
+      orgData.users = [
+        { id: "usr-admin", name: "System Administrator", username: "admin", email: "admin@company.com", position: "IT Systems Admin", passwordHash: adminHash, role: "Admin", locationId: null },
+        { id: "usr-staff", name: "Staff User", username: "staff", email: "staff@company.com", position: "Staff", passwordHash: staffHash, role: "Regional Staff", locationId: "loc-main" },
+      ];
+      await saveOrgData(orgData);
+    }
+    return orgData;
+  }, []);
+
+  // Load persisted state on mount
+  useEffect(() => {
+    try {
+      const t = localStorage.getItem("theme-pref");
+      if (t) setTheme(t);
+      const s = localStorage.getItem("sidebar-pref");
+      if (s) setSidebarOpen(s === "open");
+    } catch {}
+
+    (async () => {
+      try {
+        const orgData = await loadFromCloud({ seedIfEmpty: true });
+        setData(orgData);
+        setConnectionError(null);
+        setLastSynced(new Date());
+      } catch (err) {
+        setConnectionError(err?.message || "Could not connect to the database.");
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, [loadFromCloud]);
+
+  // Save org data to the shared database whenever it changes locally
+  const persist = useCallback(async (next) => {
+    setData(next);
+    try {
+      await saveOrgData(next);
+      setLastSynced(new Date());
+    } catch {
+      showToast("Could not save — check your connection and try again.");
+    }
+  }, [showToast]);
+
+  // Manually pull the latest data from the shared database
+  const syncNow = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const orgData = await loadFromCloud({ seedIfEmpty: false });
+      if (orgData) setData(orgData);
+      setConnectionError(null);
+      setLastSynced(new Date());
+      showToast("Synced with latest data.");
+    } catch (err) {
+      showToast("Sync failed — check your connection.");
+    } finally {
+      setSyncing(false);
+    }
+  }, [loadFromCloud, showToast]);
+
+  const toggleTheme = () => {
+    const next = theme === "light" ? "dark" : "light";
+    setTheme(next);
+    try { localStorage.setItem("theme-pref", next); } catch {}
+  };
+
+  const toggleSidebar = () => {
+    const next = !sidebarOpen;
+    setSidebarOpen(next);
+    try { localStorage.setItem("sidebar-pref", next ? "open" : "closed"); } catch {}
+  };
+
+  if (!loaded) {
+    return <div className="boot"><div className="spinner" /></div>;
+  }
+
+  if (connectionError) {
+    return (
+      <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
+        <GlobalStyles />
+        <div className="login-wrap">
+          <div className="login-card" style={{ textAlign: "center" }}>
+            <div className="confirm-icon"><AlertTriangle size={20} /></div>
+            <h3 style={{ marginBottom: 8 }}>You're offline</h3>
+            <p className="login-sub">
+              This app needs an internet connection to load the shared data.
+              Check your connection and try again.
+            </p>
+            <button
+              className="btn primary full"
+              onClick={() => { setLoaded(false); setConnectionError(null); loadFromCloud({ seedIfEmpty: true }).then((d) => { setData(d); setLastSynced(new Date()); }).catch((e) => setConnectionError(e?.message || "Could not connect.")).finally(() => setLoaded(true)); }}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
+        <GlobalStyles />
+        <LoginScreen users={data.users} onLogin={setCurrentUser} />
+      </div>
+    );
+  }
+
+  const isAdmin = currentUser.role === "Admin";
+  const scopedLocationId = isAdmin ? null : currentUser.locationId;
+
+  return (
+    <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
+      <GlobalStyles />
+      <div className="shell">
+        <Sidebar
+          open={sidebarOpen}
+          onToggle={toggleSidebar}
+          view={view}
+          setView={setView}
+          isAdmin={isAdmin}
+        />
+        <div className="main">
+          <TopBar
+            theme={theme}
+            toggleTheme={toggleTheme}
+            currentUser={currentUser}
+            onLogout={() => setCurrentUser(null)}
+            onToggleSidebar={toggleSidebar}
+            locations={data.locations}
+            scopedLocationId={scopedLocationId}
+            onSync={syncNow}
+            syncing={syncing}
+            lastSynced={lastSynced}
+          />
+          <div className="content">
+            {view === "dashboard" && (
+              <Dashboard data={data} scopedLocationId={scopedLocationId} />
+            )}
+            {view === "assets" && (
+              <AssetsView
+                data={data}
+                persist={persist}
+                isAdmin={isAdmin}
+                scopedLocationId={scopedLocationId}
+                showToast={showToast}
+              />
+            )}
+            {view === "maintenance" && (
+              <MaintenanceView data={data} persist={persist} showToast={showToast} scopedLocationId={scopedLocationId} />
+            )}
+            {view === "categories" && isAdmin && (
+              <CategoriesView data={data} persist={persist} showToast={showToast} />
+            )}
+            {view === "locations" && isAdmin && (
+              <LocationsView data={data} persist={persist} showToast={showToast} />
+            )}
+            {view === "users" && isAdmin && (
+              <UsersView data={data} persist={persist} showToast={showToast} />
+            )}
+          </div>
+        </div>
+      </div>
+      {toast && <div className={`toast ${toast.phase === "out" ? "toast-out" : "toast-in"}`}>{toast.message}</div>}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Sidebar
+--------------------------------------------------------- */
+function Sidebar({ open, onToggle, view, setView, isAdmin }) {
+  const items = [
+    { id: "dashboard", label: "Overview", icon: LayoutDashboard },
+    { id: "assets", label: "Assets", icon: Package },
+    { id: "maintenance", label: "Maintenance", icon: Wrench },
+    ...(isAdmin ? [
+      { id: "categories", label: "Categories", icon: Tags },
+      { id: "locations", label: "Locations", icon: MapPin },
+      { id: "users", label: "User Accounts", icon: Users },
+    ] : []),
+  ];
+  return (
+    <div className={`sidebar ${open ? "" : "collapsed"}`}>
+      <div className="sidebar-top">
+        {open && <div className="brand"><ShieldCheck size={18} /><span>AssetFlow</span></div>}
+        {!open && <div className="brand-mini"><ShieldCheck size={18} /></div>}
+        <button className="icon-btn" onClick={onToggle} title="Toggle menu">
+          {open ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+        </button>
+      </div>
+      <nav>
+        {items.map((it) => (
+          <button
+            key={it.id}
+            className={`nav-item ${view === it.id ? "active" : ""}`}
+            onClick={() => setView(it.id)}
+            title={it.label}
+          >
+            <it.icon size={17} />
+            {open && <span>{it.label}</span>}
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Top Bar
+--------------------------------------------------------- */
+function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced }) {
+  const locName = scopedLocationId
+    ? locations.find((l) => l.id === scopedLocationId)?.name
+    : "All Locations (HQ)";
+  const syncedLabel = lastSynced
+    ? `Synced ${lastSynced.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : "";
+  return (
+    <div className="topbar">
+      <div className="topbar-left">
+        <span className="topbar-region"><MapPin size={13} /> {locName}</span>
+      </div>
+      <div className="topbar-right">
+        {syncedLabel && <span className="user-role" style={{ marginRight: 2 }}>{syncedLabel}</span>}
+        <button className="icon-btn" onClick={onSync} title="Sync with latest data" disabled={syncing}>
+          <RefreshCw size={16} className={syncing ? "spin" : ""} />
+        </button>
+        <button className="icon-btn" onClick={toggleTheme} title="Toggle theme">
+          {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
+        </button>
+        <div className="user-chip">
+          <div className="avatar">{currentUser.name.split(" ").map((s) => s[0]).slice(0, 2).join("")}</div>
+          <div className="user-meta">
+            <div className="user-name">{currentUser.name}</div>
+            <div className="user-role">{currentUser.role}</div>
+          </div>
+        </div>
+        <button className="icon-btn" onClick={onLogout} title="Log out"><LogOut size={16} /></button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Dashboard
+--------------------------------------------------------- */
+function Dashboard({ data, scopedLocationId }) {
+  const assets = scopedLocationId
+    ? data.assets.filter((a) => a.locationId === scopedLocationId)
+    : data.assets;
+
+  const statusData = useMemo(() => {
+    const counts = {};
+    assets.forEach((a) => { counts[a.status] = (counts[a.status] || 0) + 1; });
+    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+  }, [assets]);
+
+  const categoryData = useMemo(() => {
+    const counts = {};
+    assets.forEach((a) => {
+      const cat = data.categories.find((c) => c.id === a.categoryId);
+      const name = cat ? cat.name : "Uncategorized";
+      counts[name] = (counts[name] || 0) + 1;
+    });
+    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+  }, [assets, data.categories]);
+
+  const totals = {
+    total: assets.length,
+    inUse: assets.filter((a) => a.status === "In Use").length,
+    underRepair: assets.filter((a) => a.status === "Under Repair").length,
+    inStock: assets.filter((a) => a.status === "In Stock").length,
+  };
+
+  const recent = [...assets].sort((a, b) => (b.tag > a.tag ? 1 : -1)).slice(0, 6);
+
+  return (
+    <div>
+      <div className="metrics-row">
+        <Metric label="Total Assets" value={totals.total} />
+        <Metric label="In Use" value={totals.inUse} />
+        <Metric label="In Stock" value={totals.inStock} />
+        <Metric label="Under Repair" value={totals.underRepair} />
+      </div>
+
+      <div className="charts-row">
+        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} />
+        <DonutCard title="Assets by Category" data={categoryData} palette={null} />
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>Recent Inventory</h3>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Asset Tag</th>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Location</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.length === 0 && (
+                <tr><td colSpan={5} className="empty-cell">No assets yet — add one from the Assets tab.</td></tr>
+              )}
+              {recent.map((a) => {
+                const cat = data.categories.find((c) => c.id === a.categoryId);
+                const loc = data.locations.find((l) => l.id === a.locationId);
+                return (
+                  <tr key={a.id}>
+                    <td className="mono">{a.tag}</td>
+                    <td>{a.name}</td>
+                    <td>{cat?.name || "—"}</td>
+                    <td>{loc?.name || "—"}</td>
+                    <td><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }) {
+  return (
+    <div className="metric">
+      <div className="metric-value">{value}</div>
+      <div className="metric-label">{label}</div>
+    </div>
+  );
+}
+
+function DonutCard({ title, data, palette }) {
+  const colors = (name, i) => (palette && palette[name]) || CAT_PALETTE[i % CAT_PALETTE.length];
+  return (
+    <div className="panel chart-card">
+      <div className="panel-head"><h3>{title}</h3></div>
+      {data.length === 0 ? (
+        <div className="empty-chart">No data to display</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={260}>
+          <PieChart>
+            <Pie data={data} dataKey="value" nameKey="name" innerRadius={62} outerRadius={92} paddingAngle={2}>
+              {data.map((entry, i) => (
+                <Cell key={entry.name} fill={colors(entry.name, i)} />
+              ))}
+            </Pie>
+            <Tooltip
+              contentStyle={{ fontSize: 12, padding: "6px 10px", borderRadius: 8 }}
+              itemStyle={{ fontSize: 12 }}
+              labelStyle={{ fontSize: 12 }}
+            />
+            <Legend
+              wrapperStyle={{ fontSize: 11.5, lineHeight: "18px" }}
+              iconSize={9}
+              iconType="circle"
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Assets View
+--------------------------------------------------------- */
+function emptyAsset(defaultLocationId) {
+  return {
+    id: null, tag: "", name: "", categoryId: "", assetType: "IT", brand: "", model: "",
+    serial: "", status: "In Stock", condition: "New", locationId: defaultLocationId || "",
+    assignedTo: "", purchaseDate: todayISO(), purchaseCost: "", warrantyExpiry: "",
+    calibrationDate: "", notes: "",
+  };
+}
+
+function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast }) {
+  const [search, setSearch] = useState("");
+  const [locationFilter, setLocationFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [userFilter, setUserFilter] = useState("all");
+  const [editing, setEditing] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportText, setExportText] = useState("");
+  const fileInputRef = React.useRef(null);
+
+  const assignedUserOptions = useMemo(() => {
+    const set = new Set(data.assets.map((a) => a.assignedTo).filter(Boolean));
+    return Array.from(set).sort();
+  }, [data.assets]);
+
+  const visibleAssets = useMemo(() => {
+    let list = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
+    if (locationFilter !== "all") list = list.filter((a) => a.locationId === locationFilter);
+    if (categoryFilter !== "all") list = list.filter((a) => a.categoryId === categoryFilter);
+    if (userFilter !== "all") list = list.filter((a) => a.assignedTo === userFilter);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter((a) => {
+        const loc = data.locations.find((l) => l.id === a.locationId)?.name || "";
+        const cat = data.categories.find((c) => c.id === a.categoryId)?.name || "";
+        const haystack = [
+          a.tag, a.name, a.serial, a.brand, a.model, a.status, a.condition,
+          a.assignedTo, a.notes, loc, cat,
+        ].join(" ").toLowerCase();
+        return haystack.includes(q);
+      });
+    }
+    return list;
+  }, [data.assets, data.locations, data.categories, scopedLocationId, search, locationFilter, categoryFilter, userFilter]);
+
+  const save = async (asset) => {
+    let next;
+    if (asset.id) {
+      next = { ...data, assets: data.assets.map((a) => (a.id === asset.id ? asset : a)) };
+    } else {
+      const newAsset = { ...asset, id: uid("ast"), tag: asset.tag || `AST-${uid("X").slice(-6).toUpperCase()}` };
+      next = { ...data, assets: [newAsset, ...data.assets] };
+    }
+    persist(next);
+    setEditing(null);
+    showToast("Asset saved.");
+  };
+
+  const remove = async (id) => {
+    const next = { ...data, assets: data.assets.filter((a) => a.id !== id) };
+    persist(next);
+    setConfirmDelete(null);
+    setSelected((s) => s.filter((x) => x !== id));
+    showToast("Asset deleted.");
+  };
+
+  const bulkDelete = async () => {
+    const next = { ...data, assets: data.assets.filter((a) => !selected.includes(a.id)) };
+    persist(next);
+    setSelected([]);
+    showToast(`${selected.length} asset(s) deleted.`);
+  };
+
+  const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "calibrationDate"];
+
+  const buildCSV = () => {
+    const rows = visibleAssets.map((a) => {
+      const loc = data.locations.find((l) => l.id === a.locationId)?.name || "";
+      return [a.tag, a.name, a.assetType, a.brand, a.model, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.calibrationDate];
+    });
+    return [EXPORT_COLS.join(","), ...rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
+  };
+
+  const exportCSV = () => {
+    const csv = buildCSV();
+    // Best-effort automatic download — some environments (sandboxed previews)
+    // block this silently, so we always also show a copyable fallback below.
+    try {
+      const blob = new Blob([csv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "assets-export.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore — fallback modal below covers this
+    }
+    setExportText(csv);
+    setExportOpen(true);
+  };
+
+  const copyExport = async () => {
+    try {
+      await navigator.clipboard.writeText(exportText);
+      showToast("Copied to clipboard.");
+    } catch {
+      showToast("Select the text below and copy manually.");
+    }
+  };
+
+  const triggerImport = () => fileInputRef.current?.click();
+
+  const handleImportFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = String(reader.result || "");
+        const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+        if (lines.length < 2) { showToast("CSV file has no data rows."); return; }
+        const parseLine = (line) => {
+          const out = [];
+          let cur = "", inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (ch === '"') {
+              if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+              else inQuotes = !inQuotes;
+            } else if (ch === "," && !inQuotes) {
+              out.push(cur); cur = "";
+            } else cur += ch;
+          }
+          out.push(cur);
+          return out;
+        };
+        const header = parseLine(lines[0]).map((h) => h.trim());
+        const newAssets = [];
+        for (let i = 1; i < lines.length; i++) {
+          const cells = parseLine(lines[i]);
+          const row = {};
+          header.forEach((h, idx) => { row[h] = cells[idx] ?? ""; });
+          const loc = data.locations.find((l) => l.name.toLowerCase() === (row.location || "").toLowerCase());
+          const cat = data.categories.find((c) => c.name.toLowerCase() === (row.name || "").toLowerCase()) ||
+            data.categories.find((c) => (row.assetType || "IT") === c.type);
+          newAssets.push({
+            id: uid("ast"),
+            tag: row.tag || `AST-IMP-${String(i).padStart(3, "0")}`,
+            name: row.name || "Imported Asset",
+            categoryId: cat?.id || data.categories[0]?.id || "",
+            assetType: row.assetType === "Non-IT" ? "Non-IT" : "IT",
+            brand: row.brand || "",
+            model: row.model || "",
+            serial: row.serial || "",
+            status: STATUS_OPTIONS.includes(row.status) ? row.status : "In Stock",
+            condition: CONDITION_OPTIONS.includes(row.condition) ? row.condition : "Good",
+            locationId: loc?.id || scopedLocationId || data.locations[0]?.id || "",
+            assignedTo: row.assignedTo || "",
+            purchaseDate: row.purchaseDate || todayISO(),
+            purchaseCost: Number(row.purchaseCost) || 0,
+            warrantyExpiry: row.warrantyExpiry || "",
+            calibrationDate: row.calibrationDate || "",
+            notes: "",
+          });
+        }
+        persist({ ...data, assets: [...newAssets, ...data.assets] });
+        showToast(`Imported ${newAssets.length} asset(s).`);
+      } catch {
+        showToast("Could not parse this CSV file.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <div className="search-box">
+          <Search size={15} />
+          <input placeholder="Search anything — tag, name, brand, location, category, user…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <div className="filter-group">
+          <select className="sort-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
+            <option value="all">All Locations</option>
+            {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+          <select className="sort-select" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+            <option value="all">All Categories</option>
+            {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <select className="sort-select" value={userFilter} onChange={(e) => setUserFilter(e.target.value)}>
+            <option value="all">All Users</option>
+            {assignedUserOptions.map((u) => <option key={u} value={u}>{u}</option>)}
+          </select>
+        </div>
+        <div className="view-actions">
+          {selected.length > 0 && (
+            <button className="btn danger" onClick={bulkDelete}>
+              <Trash2 size={14} /> Delete ({selected.length})
+            </button>
+          )}
+          <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleImportFile} />
+          <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import CSV</button>
+          <button className="btn ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
+          <button className="btn primary" onClick={() => setEditing(emptyAsset(scopedLocationId))}>
+            <Plus size={14} /> New Asset
+          </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style={{ width: 32 }}>
+                  <input
+                    type="checkbox"
+                    checked={visibleAssets.length > 0 && selected.length === visibleAssets.length}
+                    onChange={(e) => setSelected(e.target.checked ? visibleAssets.map((a) => a.id) : [])}
+                  />
+                </th>
+                <th>Asset Tag</th>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Location</th>
+                <th>Assigned User</th>
+                <th>Status</th>
+                <th>Condition</th>
+                <th style={{ width: 90 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleAssets.length === 0 && (
+                <tr><td colSpan={9} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
+              )}
+              {visibleAssets.map((a) => {
+                const cat = data.categories.find((c) => c.id === a.categoryId);
+                const loc = data.locations.find((l) => l.id === a.locationId);
+                return (
+                  <tr key={a.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(a.id)}
+                        onChange={(e) =>
+                          setSelected((s) => (e.target.checked ? [...s, a.id] : s.filter((x) => x !== a.id)))
+                        }
+                      />
+                    </td>
+                    <td className="mono">{a.tag}</td>
+                    <td>{a.name}</td>
+                    <td>{cat?.name || "—"}</td>
+                    <td>{loc?.name || "—"}</td>
+                    <td>{a.assignedTo || "—"}</td>
+                    <td><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
+                    <td>{a.condition}</td>
+                    <td>
+                      <div className="row-actions">
+                        <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(a)} />
+                        <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(a.id)} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {editing && (
+        <AssetModal
+          asset={editing}
+          categories={data.categories}
+          locations={data.locations}
+          isAdmin={isAdmin}
+          scopedLocationId={scopedLocationId}
+          onClose={() => setEditing(null)}
+          onSave={save}
+        />
+      )}
+      {confirmDelete && (
+        <ConfirmDialog
+          message="Delete this asset? This cannot be undone."
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => remove(confirmDelete)}
+        />
+      )}
+      {exportOpen && (
+        <Modal title="Export Assets (CSV)" onClose={() => setExportOpen(false)} width={640}>
+          <p className="export-hint">
+            A download was attempted automatically. If nothing downloaded, copy the CSV text below and paste it into a spreadsheet or a new text file.
+          </p>
+          <textarea className="export-textarea" readOnly value={exportText} onFocus={(e) => e.target.select()} rows={12} />
+          <div className="modal-actions">
+            <button type="button" className="btn ghost" onClick={() => setExportOpen(false)}>Close</button>
+            <button type="button" className="btn primary" onClick={copyExport}>Copy to Clipboard</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, onClose, onSave }) {
+  const [form, setForm] = useState(asset);
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const restricted = !isAdmin; // Regional Staff: limited edit rights on existing assets
+
+  const submit = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!form.name.trim()) {
+      alert("Please enter an asset name.");
+      return;
+    }
+    onSave(form);
+  };
+
+  return (
+    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={560}>
+      <div className="form-grid">
+        <Field label="Asset Tag">
+          <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated if left blank" disabled={restricted && !!asset.id} />
+        </Field>
+        <Field label="Asset Type">
+          <select value={form.assetType} onChange={(e) => set("assetType", e.target.value)} disabled={restricted && !!asset.id}>
+            <option value="IT">IT Asset</option>
+            <option value="Non-IT">Non-IT Asset</option>
+          </select>
+        </Field>
+        <Field label="Name">
+          <input value={form.name} onChange={(e) => set("name", e.target.value)} required disabled={restricted && !!asset.id} />
+        </Field>
+        <Field label="Category">
+          <select value={form.categoryId} onChange={(e) => set("categoryId", e.target.value)} disabled={restricted && !!asset.id}>
+            <option value="">Select category</option>
+            {categories.filter((c) => c.type === form.assetType).map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Serial Number"><input value={form.serial} onChange={(e) => set("serial", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Status">
+          <select value={form.status} onChange={(e) => set("status", e.target.value)} disabled={restricted && !!asset.id}>
+            {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </Field>
+        <Field label="Condition">
+          <select value={form.condition} onChange={(e) => set("condition", e.target.value)} disabled={restricted && !!asset.id}>
+            {CONDITION_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </Field>
+        <Field label="Location">
+          <select value={form.locationId} onChange={(e) => set("locationId", e.target.value)} disabled={!isAdmin}>
+            <option value="">Select location</option>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Assigned To"><input value={form.assignedTo} onChange={(e) => set("assignedTo", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        {form.assetType === "IT" ? (
+          <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        ) : (
+          <Field label="Calibration Date"><input type="date" value={form.calibrationDate} onChange={(e) => set("calibrationDate", e.target.value)} /></Field>
+        )}
+        <div className="form-full">
+          <Field label="Notes">
+            <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} disabled={restricted && !!asset.id} />
+          </Field>
+        </div>
+        {restricted && asset.id && (
+          <div className="form-full hint-box">
+            As Regional Staff, you can only update the Calibration Date on an existing asset. Contact your admin for other changes.
+          </div>
+        )}
+        <div className="form-full modal-actions">
+          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn primary" onClick={submit}>Save Asset</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Maintenance View
+--------------------------------------------------------- */
+function emptyMaint(assetId) {
+  return { id: null, assetId: assetId || "", description: "", cost: "", date: todayISO(), status: "Not Started" };
+}
+
+function MaintenanceView({ data, persist, showToast, scopedLocationId }) {
+  const [editing, setEditing] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const assetsInScope = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
+  const assetIds = new Set(assetsInScope.map((a) => a.id));
+  const logs = data.maintenance.filter((m) => assetIds.has(m.assetId));
+
+  const [selected, setSelected] = useState([]);
+
+  const save = async (log) => {
+    let next;
+    if (log.id) {
+      next = { ...data, maintenance: data.maintenance.map((m) => (m.id === log.id ? log : m)) };
+    } else {
+      next = { ...data, maintenance: [{ ...log, id: uid("maint") }, ...data.maintenance] };
+    }
+    persist(next);
+    setEditing(null);
+    showToast("Maintenance entry saved.");
+  };
+
+  const remove = async (id) => {
+    persist({ ...data, maintenance: data.maintenance.filter((m) => m.id !== id) });
+    setConfirmDelete(null);
+    showToast("Maintenance entry deleted.");
+  };
+
+  const bulkDelete = async () => {
+    persist({ ...data, maintenance: data.maintenance.filter((m) => !selected.includes(m.id)) });
+    showToast(`${selected.length} entry(ies) deleted.`);
+    setSelected([]);
+  };
+
+  const quickStatus = async (id, status) => {
+    persist({ ...data, maintenance: data.maintenance.map((m) => (m.id === id ? { ...m, status } : m)) });
+  };
+
+  const statusColor = { "Not Started": "#9CA3AF", "In Progress": "#F59E0B", "Done": "#10B981" };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">Service &amp; Maintenance</h2>
+        <div className="view-actions">
+          {selected.length > 0 && (
+            <button className="btn danger" onClick={bulkDelete}><Trash2 size={14} /> Delete ({selected.length})</button>
+          )}
+          <button className="btn primary" onClick={() => setEditing(emptyMaint())}><Plus size={14} /> New Entry</button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style={{ width: 32 }}>
+                  <input
+                    type="checkbox"
+                    checked={logs.length > 0 && selected.length === logs.length}
+                    onChange={(e) => setSelected(e.target.checked ? logs.map((m) => m.id) : [])}
+                  />
+                </th>
+                <th>Asset</th>
+                <th>Description</th>
+                <th>Date</th>
+                <th>Cost</th>
+                <th>Status</th>
+                <th style={{ width: 90 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.length === 0 && (
+                <tr><td colSpan={7} className="empty-cell">No maintenance entries yet — click "New Entry" to log one.</td></tr>
+              )}
+              {logs.map((m) => {
+                const asset = data.assets.find((a) => a.id === m.assetId);
+                return (
+                  <tr key={m.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(m.id)}
+                        onChange={(e) => setSelected((s) => (e.target.checked ? [...s, m.id] : s.filter((x) => x !== m.id)))}
+                      />
+                    </td>
+                    <td className="mono">{asset?.tag || "—"}</td>
+                    <td>{m.description}</td>
+                    <td>{m.date}</td>
+                    <td>{m.cost ? `$${m.cost}` : "—"}</td>
+                    <td>
+                      <select
+                        className="status-select"
+                        value={m.status}
+                        onChange={(e) => quickStatus(m.id, e.target.value)}
+                        style={{ color: statusColor[m.status], borderColor: `${statusColor[m.status]}55` }}
+                      >
+                        {MAINT_STATUS.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <div className="row-actions">
+                        <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(m)} />
+                        <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(m.id)} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {editing && (
+        <Modal title={editing.id ? "Edit Maintenance Entry" : "New Maintenance Entry"} onClose={() => setEditing(null)} width={620}>
+          <MaintForm entry={editing} assets={assetsInScope} onSave={save} onClose={() => setEditing(null)} />
+        </Modal>
+      )}
+      {confirmDelete && (
+        <ConfirmDialog message="Delete this maintenance entry?" onCancel={() => setConfirmDelete(null)} onConfirm={() => remove(confirmDelete)} />
+      )}
+    </div>
+  );
+}
+
+function MaintForm({ entry, assets, onSave, onClose }) {
+  const [form, setForm] = useState(entry);
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const submit = () => {
+    if (!form.assetId) { alert("Please select an asset."); return; }
+    if (!form.description.trim()) { alert("Please enter a description."); return; }
+    onSave(form);
+  };
+  return (
+    <div className="form-grid">
+      <Field label="Asset">
+        <select value={form.assetId} onChange={(e) => set("assetId", e.target.value)}>
+          <option value="">Select asset</option>
+          {assets.map((a) => <option key={a.id} value={a.id}>{a.tag} — {a.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Status">
+        <select value={form.status} onChange={(e) => set("status", e.target.value)}>
+          {MAINT_STATUS.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Field>
+      <div className="form-full">
+        <Field label="Description">
+          <textarea rows={2} value={form.description} onChange={(e) => set("description", e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Date"><input type="date" value={form.date} onChange={(e) => set("date", e.target.value)} /></Field>
+      <Field label="Cost"><input type="number" value={form.cost} onChange={(e) => set("cost", e.target.value)} /></Field>
+      <div className="form-full modal-actions">
+        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn primary" onClick={submit}>Save Entry</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Categories View
+--------------------------------------------------------- */
+function CategoriesView({ data, persist, showToast }) {
+  const [editing, setEditing] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const save = async (cat) => {
+    let next;
+    if (cat.id) next = { ...data, categories: data.categories.map((c) => (c.id === cat.id ? cat : c)) };
+    else next = { ...data, categories: [...data.categories, { ...cat, id: uid("cat") }] };
+    persist(next);
+    setEditing(null);
+    showToast("Category saved.");
+  };
+
+  const remove = async (id) => {
+    const inUse = data.assets.some((a) => a.categoryId === id);
+    if (inUse) {
+      showToast("Can't delete — one or more assets still use this category.");
+      setConfirmDelete(null);
+      return;
+    }
+    persist({ ...data, categories: data.categories.filter((c) => c.id !== id) });
+    setConfirmDelete(null);
+    showToast("Category deleted.");
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">Categories</h2>
+        <button className="btn primary" onClick={() => setEditing({ id: null, name: "", type: "IT", usefulLife: 3 })}>
+          <Plus size={14} /> New Category
+        </button>
+      </div>
+      <div className="panel">
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Type</th><th>Useful Life (yrs)</th><th style={{ width: 90 }}></th></tr></thead>
+            <tbody>
+              {data.categories.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.name}</td>
+                  <td><Badge color={c.type === "IT" ? "#6366F1" : "#F59E0B"}>{c.type}</Badge></td>
+                  <td>{c.usefulLife}</td>
+                  <td>
+                    <div className="row-actions">
+                      <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(c)} />
+                      <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(c.id)} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {editing && (
+        <Modal title={editing.id ? "Edit Category" : "New Category"} onClose={() => setEditing(null)}>
+          <div className="form-grid">
+            <Field label="Name"><input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
+            <Field label="Type">
+              <select value={editing.type} onChange={(e) => setEditing({ ...editing, type: e.target.value })}>
+                <option value="IT">IT</option>
+                <option value="Non-IT">Non-IT</option>
+              </select>
+            </Field>
+            <Field label="Useful Life (years)">
+              <input type="number" value={editing.usefulLife} onChange={(e) => setEditing({ ...editing, usefulLife: Number(e.target.value) })} />
+            </Field>
+            <div className="form-full modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setEditing(null)}>Cancel</button>
+              <button type="button" className="btn primary" onClick={() => { if (!editing.name.trim()) { alert("Please enter a category name."); return; } save(editing); }}>Save Category</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {confirmDelete && (
+        <ConfirmDialog message="Delete this category?" onCancel={() => setConfirmDelete(null)} onConfirm={() => remove(confirmDelete)} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Locations View
+--------------------------------------------------------- */
+function LocationsView({ data, persist, showToast }) {
+  const [editing, setEditing] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const save = async (loc) => {
+    let next;
+    if (loc.id) next = { ...data, locations: data.locations.map((l) => (l.id === loc.id ? loc : l)) };
+    else next = { ...data, locations: [...data.locations, { ...loc, id: uid("loc") }] };
+    persist(next);
+    setEditing(null);
+    showToast("Location saved.");
+  };
+
+  const remove = async (id) => {
+    const inUse = data.assets.some((a) => a.locationId === id) || data.users.some((u) => u.locationId === id);
+    if (inUse) {
+      showToast("Can't delete — assets or users are assigned to this location.");
+      setConfirmDelete(null);
+      return;
+    }
+    persist({ ...data, locations: data.locations.filter((l) => l.id !== id) });
+    setConfirmDelete(null);
+    showToast("Location deleted.");
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">Locations</h2>
+        <button className="btn primary" onClick={() => setEditing({ id: null, name: "" })}><Plus size={14} /> New Location</button>
+      </div>
+      <div className="panel">
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th style={{ width: 90 }}></th></tr></thead>
+            <tbody>
+              {data.locations.map((l) => (
+                <tr key={l.id}>
+                  <td>{l.name}</td>
+                  <td>
+                    <div className="row-actions">
+                      <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(l)} />
+                      <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(l.id)} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {editing && (
+        <Modal title={editing.id ? "Edit Location" : "New Location"} onClose={() => setEditing(null)} width={380}>
+          <div className="form-grid">
+            <Field label="Name"><input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
+            <div className="form-full modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setEditing(null)}>Cancel</button>
+              <button type="button" className="btn primary" onClick={() => { if (!editing.name.trim()) { alert("Please enter a location name."); return; } save(editing); }}>Save Location</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {confirmDelete && (
+        <ConfirmDialog message="Delete this location?" onCancel={() => setConfirmDelete(null)} onConfirm={() => remove(confirmDelete)} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Users View
+--------------------------------------------------------- */
+function emptyUser(locations) {
+  return { id: null, name: "", username: "", email: "", position: "", role: "Regional Staff", locationId: locations[0]?.id || "", password: "" };
+}
+
+function UsersView({ data, persist, showToast }) {
+  const [editing, setEditing] = useState(null);
+  const [resetTarget, setResetTarget] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const save = async (form) => {
+    if (form.id) {
+      const next = { ...data, users: data.users.map((u) => (u.id === form.id ? { ...u, name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId } : u)) };
+      persist(next);
+    } else {
+      const hash = await sha256(form.password || "changeme123");
+      const newUser = { id: uid("usr"), name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId, passwordHash: hash };
+      persist({ ...data, users: [...data.users, newUser] });
+    }
+    setEditing(null);
+    showToast("User saved.");
+  };
+
+  const remove = async (id) => {
+    persist({ ...data, users: data.users.filter((u) => u.id !== id) });
+    setConfirmDelete(null);
+    showToast("User removed.");
+  };
+
+  const resetPassword = async (id, newPass) => {
+    const hash = await sha256(newPass);
+    persist({ ...data, users: data.users.map((u) => (u.id === id ? { ...u, passwordHash: hash } : u)) });
+    setResetTarget(null);
+    showToast("Password reset.");
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">User Accounts</h2>
+        <button className="btn primary" onClick={() => setEditing(emptyUser(data.locations))}><Plus size={14} /> New User</button>
+      </div>
+      <div className="panel">
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Position</th><th>Username</th><th>Role</th><th>Location</th><th style={{ width: 130 }}></th></tr></thead>
+            <tbody>
+              {data.users.map((u) => {
+                const loc = data.locations.find((l) => l.id === u.locationId);
+                return (
+                  <tr key={u.id}>
+                    <td>{u.name}</td>
+                    <td>{u.position || "—"}</td>
+                    <td className="mono">{u.username}</td>
+                    <td><Badge color={u.role === "Admin" ? "#6366F1" : "#10B981"}>{u.role}</Badge></td>
+                    <td>{loc?.name || "— (Global)"}</td>
+                    <td>
+                      <div className="row-actions">
+                        <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing({ ...u })} />
+                        <IconBtn icon={KeyRound} title="Reset Password" onClick={() => setResetTarget(u.id)} />
+                        <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(u.id)} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {editing && (
+        <Modal title={editing.id ? "Edit User" : "New User"} onClose={() => setEditing(null)}>
+          <div className="form-grid">
+            <Field label="Full Name"><input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
+            <Field label="Position / Title"><input value={editing.position || ""} onChange={(e) => setEditing({ ...editing, position: e.target.value })} placeholder="e.g. HR Manager" /></Field>
+            <Field label="Username"><input value={editing.username} onChange={(e) => setEditing({ ...editing, username: e.target.value })} /></Field>
+            <Field label="Email"><input type="email" value={editing.email || ""} onChange={(e) => setEditing({ ...editing, email: e.target.value })} placeholder="name@company.com" /></Field>
+            <Field label="Role">
+              <select value={editing.role} onChange={(e) => setEditing({ ...editing, role: e.target.value })}>
+                <option value="Admin">Admin</option>
+                <option value="Regional Staff">Regional Staff</option>
+              </select>
+            </Field>
+            {editing.role !== "Admin" && (
+              <Field label="Location">
+                <select value={editing.locationId} onChange={(e) => setEditing({ ...editing, locationId: e.target.value })}>
+                  {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+              </Field>
+            )}
+            {!editing.id && (
+              <Field label="Temporary Password">
+                <input type="text" value={editing.password} onChange={(e) => setEditing({ ...editing, password: e.target.value })} placeholder="e.g. changeme123" />
+              </Field>
+            )}
+            <div className="form-full modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setEditing(null)}>Cancel</button>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => {
+                  if (!editing.name.trim() || !editing.username.trim()) {
+                    alert("Please enter both a full name and username.");
+                    return;
+                  }
+                  save(editing);
+                }}
+              >
+                Save User
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {resetTarget && (
+        <ResetPasswordModal onClose={() => setResetTarget(null)} onConfirm={(pass) => resetPassword(resetTarget, pass)} />
+      )}
+      {confirmDelete && (
+        <ConfirmDialog message="Remove this user's access?" onCancel={() => setConfirmDelete(null)} onConfirm={() => remove(confirmDelete)} />
+      )}
+    </div>
+  );
+}
+
+function ResetPasswordModal({ onClose, onConfirm }) {
+  const [pass, setPass] = useState("");
+  const submit = () => {
+    if (!pass) { alert("Please enter a new password."); return; }
+    onConfirm(pass);
+  };
+  return (
+    <Modal title="Reset Password" onClose={onClose} width={380}>
+      <div className="form-grid" onKeyDown={(e) => { if (e.key === "Enter") submit(); }}>
+        <Field label="New Password"><input type="text" value={pass} onChange={(e) => setPass(e.target.value)} autoFocus /></Field>
+        <div className="form-full modal-actions">
+          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn primary" onClick={submit}>Set Password</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------
+   Global styles
+--------------------------------------------------------- */
+function GlobalStyles() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Inter:wght@400;500;600&display=swap');
+
+      .theme-light {
+        --bg: #F7F8FA; --surface: #FFFFFF; --border: #E5E7EB; --text: #111827;
+        --text-soft: #6B7280; --accent: #4F46E5; --accent-soft: #EEF2FF; --danger: #EF4444;
+      }
+      .theme-dark {
+        --bg: #12141A; --surface: #1A1D24; --border: #2A2E38; --text: #F3F4F6;
+        --text-soft: #9CA3AF; --accent: #818CF8; --accent-soft: #262B45; --danger: #F87171;
+      }
+      .theme-light, .theme-dark { min-height: 100vh; background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      h1,h2,h3 { font-family: 'Sora', 'Inter', sans-serif; margin: 0; }
+
+      .boot { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+      .spinner { width: 28px; height: 28px; border-radius: 999px; border: 3px solid #ddd; border-top-color: #4F46E5; animation: spin 0.8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+      .login-card { width: 360px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; }
+      .login-logo { display: flex; align-items: center; gap: 8px; font-family: 'Sora', sans-serif; font-weight: 700; font-size: 18px; color: var(--accent); }
+      .login-sub { color: var(--text-soft); font-size: 13px; margin: 6px 0 22px; }
+      .login-hint { margin-top: 16px; font-size: 12px; color: var(--text-soft); text-align: center; }
+      .form-error { background: #FEE2E2; color: #B91C1C; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; margin-bottom: 12px; }
+
+      .shell { display: flex; min-height: 100vh; }
+      .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.18s ease; flex-shrink: 0; }
+      .sidebar.collapsed { width: 64px; }
+      .sidebar-top { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--border); }
+      .brand { display: flex; align-items: center; gap: 8px; font-family: 'Sora', sans-serif; font-weight: 700; color: var(--accent); white-space: nowrap; }
+      .brand-mini { display: flex; align-items: center; justify-content: center; color: var(--accent); width: 100%; }
+      nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; }
+      .nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: none; background: none; color: var(--text-soft); cursor: pointer; font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; }
+      .nav-item:hover { background: var(--accent-soft); color: var(--accent); }
+      .nav-item.active { background: var(--accent-soft); color: var(--accent); }
+
+      .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
+      .topbar-region { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-soft); background: var(--bg); padding: 6px 12px; border-radius: 999px; }
+      .topbar-right { display: flex; align-items: center; gap: 10px; }
+      .user-chip { display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 999px; background: var(--bg); }
+      .avatar { width: 28px; height: 28px; border-radius: 999px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+      .user-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; }
+      .user-role { font-size: 11px; color: var(--text-soft); }
+
+      .content { padding: 24px; flex: 1; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; }
+      .content::-webkit-scrollbar { display: none; }
+
+      .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+      .metric { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+      .metric-value { font-size: 26px; font-weight: 700; font-family: 'Sora', sans-serif; }
+      .metric-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+
+      .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+      .chart-card { min-height: 320px; }
+      .empty-chart { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--text-soft); font-size: 13px; }
+
+      .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
+      .panel-head { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+      .panel-head h3 { font-size: 14.5px; }
+
+      .table-wrap { overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; }
+      .table-wrap::-webkit-scrollbar { display: none; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      thead th { text-align: left; padding: 11px 16px; color: var(--text-soft); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; border-bottom: 1px solid var(--border); white-space: nowrap; background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+      tbody td { padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+      tbody tr:last-child td { border-bottom: none; }
+      .mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
+      .empty-cell { text-align: center; color: var(--text-soft); padding: 28px !important; white-space: normal; }
+
+      .badge { padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; display: inline-block; }
+      .status-select { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 4px 10px; background: var(--surface); border: 1px solid; }
+
+      .view-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+      .view-title { font-size: 18px; }
+      .view-actions { display: flex; gap: 8px; }
+      .search-box { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; width: 280px; color: var(--text-soft); }
+      .search-box input { border: none; outline: none; background: none; color: var(--text); font-size: 13px; width: 100%; }
+      .sort-select { border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; font-size: 13px; background: var(--surface); color: var(--text); }
+      .filter-group { display: flex; gap: 8px; flex-wrap: wrap; }
+      .export-hint { font-size: 12.5px; color: var(--text-soft); margin-bottom: 10px; }
+      .export-textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--bg); color: var(--text); resize: vertical; }
+
+      .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; }
+      .btn.primary { background: var(--accent); color: white; }
+      .btn.ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
+      .btn.ghost.danger { color: var(--danger); }
+      .btn.danger { background: var(--danger); color: white; }
+      .btn.full { width: 100%; justify-content: center; margin-top: 6px; }
+
+      .icon-btn { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text-soft); cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease; }
+      .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+      .icon-btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: color-mix(in srgb, var(--danger) 8%, var(--surface)); }
+      .icon-btn.danger:hover { color: white; background: var(--danger); border-color: var(--danger); }
+      .icon-btn:active { transform: scale(0.94); }
+      .row-actions { display: flex; gap: 6px; }
+
+      .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+      .modal-head h3 { font-size: 15px; }
+      .modal-body { padding: 20px; }
+      .modal.confirm { max-width: 340px; padding: 22px; text-align: center; }
+      .confirm-icon { width: 40px; height: 40px; border-radius: 999px; background: #FEE2E2; color: #DC2626; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; }
+      .confirm-actions { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
+
+      .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .form-full { grid-column: 1 / -1; }
+      .field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-soft); font-weight: 500; }
+      .field input, .field select, .field textarea {
+        border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13.5px;
+        background: var(--bg); color: var(--text); font-family: inherit;
+      }
+      .field input:disabled, .field select:disabled, .field textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+      .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+      .hint-box { background: var(--accent-soft); color: var(--accent); font-size: 12px; padding: 10px 12px; border-radius: 8px; }
+
+      .spin { animation: spin 0.8s linear infinite; }
+      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+      .toast { position: fixed; bottom: 20px; left: 50%; background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 999px; font-size: 13px; z-index: 100; box-shadow: 0 8px 24px rgba(0,0,0,0.18); }
+      .toast-in { animation: toastIn 0.2s ease-out forwards; }
+      .toast-out { animation: toastOut 0.2s ease-in forwards; }
+      @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+      @keyframes toastOut { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, 8px); } }
+
+      .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; animation: overlayIn 0.15s ease-out; }
+      .modal { background: var(--surface); border-radius: 14px; width: 100%; max-height: 88vh; overflow-y: auto; animation: modalIn 0.16s ease-out; scrollbar-width: none; -ms-overflow-style: none; }
+      .modal::-webkit-scrollbar { display: none; }
+      @keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes modalIn { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+
+      @media (max-width: 860px) {
+        .sidebar { position: fixed; z-index: 40; height: 100vh; }
+        .sidebar:not(.collapsed) { width: 220px; }
+        .metrics-row { grid-template-columns: repeat(2, 1fr); }
+        .charts-row { grid-template-columns: 1fr; }
+        .form-grid { grid-template-columns: 1fr; }
+        .search-box { width: 100%; }
+        .view-head { flex-direction: column; align-items: stretch; }
+      }
+    `}</style>
+  );
+}
