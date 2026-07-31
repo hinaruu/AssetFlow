@@ -391,6 +391,16 @@ export default function App() {
     try { localStorage.setItem("sidebar-pref", next ? "open" : "closed"); } catch {}
   };
 
+  // Keep the page background (outside the app's own div) in sync with the
+  // theme, so overscroll/bounce edges never flash white in dark mode.
+  useEffect(() => {
+    const bg = theme === "dark" ? "#12141A" : "#F7F8FA";
+    document.documentElement.style.backgroundColor = bg;
+    document.body.style.backgroundColor = bg;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", theme === "dark" ? "#12141A" : "#3B82F6");
+  }, [theme]);
+
   if (!loaded) {
     return <div className="boot"><div className="spinner" /></div>;
   }
@@ -430,6 +440,7 @@ export default function App() {
 
   const isAdmin = currentUser.role === "Admin";
   const scopedLocationId = isAdmin ? null : currentUser.locationId;
+  const pendingCount = data.assets.filter((a) => a.pendingDeletion).length;
 
   return (
     <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
@@ -441,6 +452,7 @@ export default function App() {
           view={view}
           setView={setView}
           isAdmin={isAdmin}
+          pendingCount={pendingCount}
         />
         <div className="main">
           <TopBar
@@ -487,6 +499,9 @@ export default function App() {
             {view === "activity" && isAdmin && (
               <ActivityLogView data={data} />
             )}
+            {view === "approvals" && isAdmin && (
+              <ApprovalsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
+            )}
           </div>
         </div>
       </div>
@@ -498,7 +513,7 @@ export default function App() {
 /* ---------------------------------------------------------
    Sidebar
 --------------------------------------------------------- */
-function Sidebar({ open, onToggle, view, setView, isAdmin }) {
+function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
   const items = [
     { id: "dashboard", label: "Overview", icon: LayoutDashboard },
     { id: "assets", label: "Assets", icon: Package },
@@ -509,6 +524,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin }) {
       { id: "users", label: "User Accounts", icon: Users },
       { id: "backup", label: "Backup & Restore", icon: Download },
       { id: "activity", label: "Activity Log", icon: ShieldCheck },
+      { id: "approvals", label: "Approvals", icon: AlertTriangle, badge: pendingCount },
     ] : []),
   ];
   return (
@@ -530,6 +546,11 @@ function Sidebar({ open, onToggle, view, setView, isAdmin }) {
           >
             <it.icon size={17} />
             {open && <span>{it.label}</span>}
+            {!!it.badge && (
+              <span style={{ marginLeft: "auto", background: "#EF4444", color: "white", borderRadius: 999, fontSize: 11, fontWeight: 700, padding: "1px 7px" }}>
+                {it.badge}
+              </span>
+            )}
           </button>
         ))}
       </nav>
@@ -720,6 +741,8 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [userFilter, setUserFilter] = useState("all");
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [requestDeleteTarget, setRequestDeleteTarget] = useState(null); // asset id awaiting a reason
+  const [deleteReason, setDeleteReason] = useState("");
   const [selected, setSelected] = useState([]);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportText, setExportText] = useState("");
@@ -752,15 +775,31 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
 
   const save = async (asset) => {
     let next;
+    let autoMaint = null;
     if (asset.id) {
-      next = withLog({ ...data, assets: data.assets.map((a) => (a.id === asset.id ? asset : a)) }, currentUser, `Edited asset "${asset.name || asset.tag}"`);
+      const prev = data.assets.find((a) => a.id === asset.id);
+      if (asset.status === "Under Repair" && prev?.status !== "Under Repair") {
+        autoMaint = { id: uid("maint"), assetId: asset.id, description: "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+      }
+      next = withLog({
+        ...data,
+        assets: data.assets.map((a) => (a.id === asset.id ? asset : a)),
+        maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
+      }, currentUser, `Edited asset "${asset.name || asset.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`);
     } else {
       const newAsset = { ...asset, id: uid("ast"), tag: asset.tag || `AST-${uid("X").slice(-6).toUpperCase()}` };
-      next = withLog({ ...data, assets: [newAsset, ...data.assets] }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`);
+      if (newAsset.status === "Under Repair") {
+        autoMaint = { id: uid("maint"), assetId: newAsset.id, description: "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+      }
+      next = withLog({
+        ...data,
+        assets: [newAsset, ...data.assets],
+        maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
+      }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`);
     }
     persist(next);
     setEditing(null);
-    showToast("Asset saved.");
+    showToast(autoMaint ? "Asset saved — added to Maintenance." : "Asset saved.");
   };
 
   const remove = async (id) => {
@@ -789,6 +828,31 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     persist(next);
     setSelected([]);
     showToast(`${selected.length} asset(s) deleted.`);
+  };
+
+  // Non-admins can't delete outright — they submit a reason, and the asset
+  // is flagged for the Admin to approve or reject under "Approvals".
+  const submitDeleteRequest = async () => {
+    if (!deleteReason.trim()) { alert("Please enter a reason for this deletion request."); return; }
+    const asset = data.assets.find((a) => a.id === requestDeleteTarget);
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === requestDeleteTarget
+        ? { ...a, pendingDeletion: { requestedBy: currentUser.id, requestedByName: currentUser.name, reason: deleteReason.trim(), requestedAt: new Date().toISOString() } }
+        : a)),
+    }, currentUser, `Requested deletion of asset "${asset?.name || asset?.tag}" — reason: ${deleteReason.trim()}`);
+    persist(next);
+    setRequestDeleteTarget(null);
+    setDeleteReason("");
+    showToast("Deletion request sent for Admin approval.");
+  };
+
+  const startDelete = (asset) => {
+    if (isAdmin) {
+      setConfirmDelete(asset.id);
+    } else if (!asset.pendingDeletion) {
+      setRequestDeleteTarget(asset.id);
+    }
   };
 
   const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "calibrationDate"];
@@ -917,7 +981,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           </select>
         </div>
         <div className="view-actions">
-          {selected.length > 0 && (
+          {isAdmin && selected.length > 0 && (
             <button className="btn danger" onClick={bulkDelete}>
               <Trash2 size={14} /> Delete ({selected.length})
             </button>
@@ -976,12 +1040,24 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     <td>{cat?.name || "—"}</td>
                     <td>{loc?.name || "—"}</td>
                     <td>{a.assignedTo || "—"}</td>
-                    <td><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
+                    <td>
+                      <Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge>
+                      {a.pendingDeletion && (
+                        <div style={{ marginTop: 4 }}>
+                          <Badge color="#EF4444">Pending Deletion</Badge>
+                        </div>
+                      )}
+                    </td>
                     <td>{a.condition}</td>
                     <td>
                       <div className="row-actions">
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(a)} />
-                        <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(a.id)} />
+                        <IconBtn
+                          icon={Trash2}
+                          title={!isAdmin && a.pendingDeletion ? "Awaiting Admin approval" : "Delete"}
+                          danger
+                          onClick={() => startDelete(a)}
+                        />
                       </div>
                     </td>
                   </tr>
@@ -1010,6 +1086,25 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           onConfirm={() => remove(confirmDelete)}
         />
       )}
+      {requestDeleteTarget && (
+        <Modal title="Request Deletion" onClose={() => { setRequestDeleteTarget(null); setDeleteReason(""); }} width={440}>
+          <div className="form-grid">
+            <div className="form-full hint-box">
+              This asset won't be deleted right away — your request and reason go to an
+              Admin for approval first.
+            </div>
+            <div className="form-full">
+              <Field label="Reason for deletion">
+                <textarea value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} rows={3} placeholder="e.g. Disposed, duplicate entry, no longer in use..." autoFocus />
+              </Field>
+            </div>
+            <div className="form-full modal-actions">
+              <button type="button" className="btn ghost" onClick={() => { setRequestDeleteTarget(null); setDeleteReason(""); }}>Cancel</button>
+              <button type="button" className="btn danger" onClick={submitDeleteRequest}>Submit Request</button>
+            </div>
+          </div>
+        </Modal>
+      )}
       {exportOpen && (
         <Modal title="Export Assets (CSV)" onClose={() => setExportOpen(false)} width={640}>
           <p className="export-hint">
@@ -1029,7 +1124,6 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
 function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, onClose, onSave }) {
   const [form, setForm] = useState(asset);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-  const restricted = !isAdmin; // Regional Staff: limited edit rights on existing assets
 
   const submit = (e) => {
     if (e && e.preventDefault) e.preventDefault();
@@ -1044,62 +1138,57 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
     <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={560}>
       <div className="form-grid">
         <Field label="Asset Tag">
-          <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated if left blank" disabled={restricted && !!asset.id} />
+          <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated if left blank" />
         </Field>
         <Field label="Asset Type">
-          <select value={form.assetType} onChange={(e) => set("assetType", e.target.value)} disabled={restricted && !!asset.id}>
+          <select value={form.assetType} onChange={(e) => set("assetType", e.target.value)}>
             <option value="IT">IT Asset</option>
             <option value="Non-IT">Non-IT Asset</option>
           </select>
         </Field>
         <Field label="Name">
-          <input value={form.name} onChange={(e) => set("name", e.target.value)} required disabled={restricted && !!asset.id} />
+          <input value={form.name} onChange={(e) => set("name", e.target.value)} required />
         </Field>
         <Field label="Category">
-          <select value={form.categoryId} onChange={(e) => set("categoryId", e.target.value)} disabled={restricted && !!asset.id}>
+          <select value={form.categoryId} onChange={(e) => set("categoryId", e.target.value)}>
             <option value="">Select category</option>
             {categories.filter((c) => c.type === form.assetType).map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
         </Field>
-        <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} disabled={restricted && !!asset.id} /></Field>
-        <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} disabled={restricted && !!asset.id} /></Field>
-        <Field label="Serial Number"><input value={form.serial} onChange={(e) => set("serial", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} /></Field>
+        <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} /></Field>
+        <Field label="Serial Number"><input value={form.serial} onChange={(e) => set("serial", e.target.value)} /></Field>
         <Field label="Status">
-          <select value={form.status} onChange={(e) => set("status", e.target.value)} disabled={restricted && !!asset.id}>
+          <select value={form.status} onChange={(e) => set("status", e.target.value)}>
             {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </Field>
         <Field label="Condition">
-          <select value={form.condition} onChange={(e) => set("condition", e.target.value)} disabled={restricted && !!asset.id}>
+          <select value={form.condition} onChange={(e) => set("condition", e.target.value)}>
             {CONDITION_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </Field>
         <Field label="Location">
-          <select value={form.locationId} onChange={(e) => set("locationId", e.target.value)} disabled={!isAdmin}>
+          <select value={form.locationId} onChange={(e) => set("locationId", e.target.value)}>
             <option value="">Select location</option>
             {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
         </Field>
-        <Field label="Assigned To"><input value={form.assignedTo} onChange={(e) => set("assignedTo", e.target.value)} disabled={restricted && !!asset.id} /></Field>
-        <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} disabled={restricted && !!asset.id} /></Field>
-        <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+        <Field label="Assigned To"><input value={form.assignedTo} onChange={(e) => set("assignedTo", e.target.value)} /></Field>
+        <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
+        <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
         {form.assetType === "IT" ? (
-          <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} disabled={restricted && !!asset.id} /></Field>
+          <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
         ) : (
           <Field label="Calibration Date"><input type="date" value={form.calibrationDate} onChange={(e) => set("calibrationDate", e.target.value)} /></Field>
         )}
         <div className="form-full">
           <Field label="Notes">
-            <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} disabled={restricted && !!asset.id} />
+            <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} />
           </Field>
         </div>
-        {restricted && asset.id && (
-          <div className="form-full hint-box">
-            As Regional Staff, you can only update the Calibration Date on an existing asset. Contact your admin for other changes.
-          </div>
-        )}
         <div className="form-full modal-actions">
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" onClick={submit}>Save Asset</button>
@@ -1787,6 +1876,78 @@ function ActivityLogView({ data }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Approvals (pending asset-deletion requests)
+--------------------------------------------------------- */
+function ApprovalsView({ data, persist, showToast, currentUser }) {
+  const pending = data.assets.filter((a) => a.pendingDeletion);
+
+  const approve = async (asset) => {
+    const removedLogs = data.maintenance.filter((m) => m.assetId === asset.id).length;
+    const suffix = removedLogs > 0 ? ` (and ${removedLogs} maintenance record${removedLogs > 1 ? "s" : ""})` : "";
+    const next = withLog({
+      ...data,
+      assets: data.assets.filter((a) => a.id !== asset.id),
+      maintenance: data.maintenance.filter((m) => m.assetId !== asset.id),
+    }, currentUser, `Approved deletion of asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}${suffix}`);
+    persist(next);
+    showToast("Deletion approved.");
+  };
+
+  const reject = async (asset) => {
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === asset.id ? { ...a, pendingDeletion: null } : a)),
+    }, currentUser, `Rejected deletion request for asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}`);
+    persist(next);
+    showToast("Deletion request rejected — asset kept.");
+  };
+
+  const formatWhen = (iso) => {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
+  return (
+    <div>
+      <div className="view-head">
+        <h2 className="view-title">Approvals</h2>
+      </div>
+      <p className="export-hint">
+        Deletion requests from Regional Staff wait here until you approve or reject them.
+        Nothing is removed until you say so.
+      </p>
+
+      {pending.length === 0 ? (
+        <div className="panel">
+          <div className="empty-cell">No pending requests right now.</div>
+        </div>
+      ) : (
+        pending.map((a) => (
+          <div className="panel" key={a.id}>
+            <div className="panel-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h3>{a.name || a.tag}</h3>
+              <Badge color="#EF4444">Pending Deletion</Badge>
+            </div>
+            <div style={{ padding: "18px" }}>
+              <p className="login-sub" style={{ margin: "0 0 6px" }}>
+                <strong>Requested by:</strong> {a.pendingDeletion.requestedByName} on {formatWhen(a.pendingDeletion.requestedAt)}
+              </p>
+              <p className="login-sub" style={{ margin: "0 0 16px" }}>
+                <strong>Reason:</strong> {a.pendingDeletion.reason}
+              </p>
+              <div className="row-actions">
+                <button className="btn ghost" onClick={() => reject(a)}>Reject — Keep Asset</button>
+                <button className="btn danger" onClick={() => approve(a)}>Approve — Delete Asset</button>
+              </div>
+            </div>
+          </div>
+        ))
+      )}
     </div>
   );
 }
