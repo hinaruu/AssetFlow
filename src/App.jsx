@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
   KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
-  Bell, Copy, Truck,
+  Bell, Copy, Truck, CheckSquare, Archive,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
@@ -104,6 +104,13 @@ const STATUS_COLORS = {
 };
 const STATUS_OPTIONS = Object.keys(STATUS_COLORS);
 const CAT_PALETTE = ["#6366F1", "#10B981", "#F59E0B", "#EC4899", "#06B6D4", "#8B5CF6", "#84CC16", "#F97316"];
+
+// Gives each category a stable color (by its position in the categories list)
+// so the same category always shows the same dot color across views.
+function categoryColor(categories, categoryId) {
+  const idx = categories.findIndex((c) => c.id === categoryId);
+  return idx >= 0 ? CAT_PALETTE[idx % CAT_PALETTE.length] : "#9CA3AF";
+}
 
 function seedData() {
   const locations = [
@@ -739,10 +746,10 @@ function Dashboard({ data, scopedLocationId }) {
   return (
     <div>
       <div className="metrics-row">
-        <Metric label="Total Assets" value={totals.total} />
-        <Metric label="In Use" value={totals.inUse} />
-        <Metric label="In Stock" value={totals.inStock} />
-        <Metric label="Under Repair" value={totals.underRepair} />
+        <Metric label="Total Assets" value={totals.total} icon={Package} color="#6366F1" />
+        <Metric label="In Use" value={totals.inUse} icon={CheckSquare} color={STATUS_COLORS["In Use"]} />
+        <Metric label="In Stock" value={totals.inStock} icon={Archive} color={STATUS_COLORS["In Stock"]} />
+        <Metric label="Under Repair" value={totals.underRepair} icon={Wrench} color={STATUS_COLORS["Under Repair"]} />
       </div>
 
       <div className="charts-row">
@@ -776,7 +783,10 @@ function Dashboard({ data, scopedLocationId }) {
                   <tr key={a.id}>
                     <td className="mono" data-label="Asset Tag">{a.tag}</td>
                     <td data-label="Name">{a.name}</td>
-                    <td data-label="Category">{cat?.name || "—"}</td>
+                    <td data-label="Category">
+                      {cat && <span className="cat-dot" style={{ background: categoryColor(data.categories, a.categoryId) }} />}
+                      {cat?.name || "—"}
+                    </td>
                     <td data-label="Location">{loc?.name || "—"}</td>
                     <td data-label="Status"><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
                   </tr>
@@ -790,9 +800,14 @@ function Dashboard({ data, scopedLocationId }) {
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, icon: Icon, color }) {
   return (
     <div className="metric">
+      {Icon && (
+        <div className="metric-icon" style={{ background: `${color}22`, color }}>
+          <Icon size={16} />
+        </div>
+      )}
       <div className="metric-value">{value}</div>
       <div className="metric-label">{label}</div>
     </div>
@@ -1189,11 +1204,15 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
               <button className="btn ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
             </>
           )}
-          <button className="btn primary" onClick={() => setEditing(emptyAsset(scopedLocationId))}>
+          <button className="btn primary new-asset-btn" onClick={() => setEditing(emptyAsset(scopedLocationId))}>
             <Plus size={14} /> New Asset
           </button>
         </div>
       </div>
+
+      <button className="fab-add" onClick={() => setEditing(emptyAsset(scopedLocationId))} title="New Asset">
+        <Plus size={22} />
+      </button>
 
       <div className="panel">
         <div className="table-wrap">
@@ -1238,7 +1257,10 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                       <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
                     </td>
                     <td data-label="Name">{a.name}</td>
-                    <td data-label="Category">{cat?.name || "—"}</td>
+                    <td data-label="Category">
+                      {cat && <span className="cat-dot" style={{ background: categoryColor(data.categories, a.categoryId) }} />}
+                      {cat?.name || "—"}
+                    </td>
                     <td data-label="Location">{loc?.name || "—"}</td>
                     <td data-label="Assigned User">{a.assignedTo || "—"}</td>
                     <td data-label="Status">
@@ -2423,7 +2445,8 @@ function GlobalStyles() {
       .content::-webkit-scrollbar { display: none; }
 
       .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
-      .metric { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+      .metric { background: var(--surface); border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+      .metric-icon { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
       .metric-value { font-size: 26px; font-weight: 700; font-family: 'Sora', sans-serif; }
       .metric-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
 
@@ -2442,6 +2465,8 @@ function GlobalStyles() {
       tbody td { padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
       tbody tr:last-child td { border-bottom: none; }
       .mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
+      .cat-dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 7px; vertical-align: middle; }
+      tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
       .empty-cell { text-align: center; color: var(--text-soft); padding: 28px !important; white-space: normal; }
 
       .badge { padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; display: inline-block; }
@@ -2500,7 +2525,8 @@ function GlobalStyles() {
       @keyframes toastOut { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, 8px); } }
 
       .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 16px; animation: overlayIn 0.15s ease-out; }
-      .modal { background: var(--surface); border-radius: 14px; width: 100%; max-height: 88vh; overflow-y: auto; animation: modalIn 0.16s ease-out; scrollbar-width: none; -ms-overflow-style: none; }
+      .modal { background: var(--surface); border-radius: 14px; width: 100%; max-height: 88vh; overflow-y: auto; animation: modalIn 0.16s ease-out; scrollbar-width: none; -ms-overflow-style: none; box-shadow: 0 16px 40px rgba(0,0,0,0.2); }
+      .fab-add { display: none; }
       .modal::-webkit-scrollbar { display: none; }
       @keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
       @keyframes modalIn { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
@@ -2526,6 +2552,14 @@ function GlobalStyles() {
         .view-head { flex-direction: column; align-items: stretch; }
         .view-actions { flex-wrap: wrap; }
         .view-actions .btn { flex: 1; justify-content: center; }
+        .new-asset-btn { display: none; }
+        .fab-add {
+          display: flex; align-items: center; justify-content: center;
+          position: fixed; bottom: 20px; right: 20px; width: 52px; height: 52px;
+          border-radius: 999px; background: var(--accent); color: white; border: none;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.28); z-index: 40; cursor: pointer;
+        }
+        .fab-add:active { transform: scale(0.94); }
         .modal-overlay { padding: 0; align-items: flex-end; }
         .modal { max-width: 100% !important; width: 100%; max-height: 92vh; border-radius: 16px 16px 0 0; }
         .notif-panel { width: calc(100vw - 24px); right: -12px; }
