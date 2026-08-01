@@ -13,6 +13,15 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl || "", supabaseAnonKey || "");
 
+// A blank form field comes through as "" (empty string), not null/undefined.
+// Postgres numeric columns reject "" outright, so any optional number field
+// must be funneled through this before hitting the database.
+function num(v) {
+  if (v === "" || v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : n;
+}
+
 /* ---------------------------------------------------------
    Row <-> app-object mapping.
    The app still works with the exact same camelCase shape it
@@ -51,7 +60,7 @@ const TABLES = {
       brand: a.brand || null, model: a.model || null, serial: a.serial || null,
       status: a.status || null, condition: a.condition || null,
       location_id: a.locationId || null, assigned_to: a.assignedTo || null,
-      purchase_date: a.purchaseDate || null, purchase_cost: a.purchaseCost ?? null,
+      purchase_date: a.purchaseDate || null, purchase_cost: num(a.purchaseCost),
       warranty_expiry: a.warrantyExpiry || null,
       requires_calibration: !!a.requiresCalibration,
       calibration_date: a.calibrationDate || null,
@@ -74,7 +83,7 @@ const TABLES = {
     table: "maintenance",
     toRow: (m) => ({
       id: m.id, asset_id: m.assetId || null, description: m.description || null,
-      cost: m.cost ?? null, date: m.date || null, status: m.status || null,
+      cost: num(m.cost), date: m.date || null, status: m.status || null,
     }),
     fromRow: (r) => ({
       id: r.id, assetId: r.asset_id, description: r.description, cost: r.cost, date: r.date, status: r.status,
