@@ -25,3 +25,8 @@ create policy "Public write access"
 create policy "Public update access"
   on app_data for update
   using (true);
+
+-- Enables the live feed: without this, changes only show up when someone
+-- manually hits Sync. With it, every connected device gets pushed updates
+-- the instant anyone saves.
+alter publication supabase_realtime add table app_data;

@@ -46,3 +46,29 @@ export async function saveOrgData(payload) {
 
   if (error) throw error;
 }
+
+/**
+ * Subscribes to live changes on the shared data row via Supabase Realtime.
+ * Whenever ANY user saves (insert or update), onChange is called with the
+ * new payload — no polling, no manual sync button needed. Requires Realtime
+ * to be enabled for the app_data table (see supabase-setup.sql).
+ *
+ * Returns an unsubscribe function — call it on unmount to clean up.
+ */
+export function subscribeToOrgData(onChange) {
+  const channel = supabase
+    .channel("app_data_live")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "app_data", filter: `id=eq.${ROW_ID}` },
+      (payload) => {
+        const next = payload.new?.payload;
+        if (next) onChange({ auditLog: [], ...next });
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}

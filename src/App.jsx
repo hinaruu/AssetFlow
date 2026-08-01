@@ -6,7 +6,7 @@ import {
   Bell, Copy, Truck,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
-import { fetchOrgData, saveOrgData } from "./lib/supabase.js";
+import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
 
 /* ---------------------------------------------------------
    Helpers
@@ -412,6 +412,17 @@ export default function App() {
     })();
   }, [loadFromCloud]);
 
+  // Live feed: any change anyone saves is pushed here automatically —
+  // no manual sync needed. The Sync button still works as a manual
+  // fallback (e.g. right after reconnecting).
+  useEffect(() => {
+    const unsubscribe = subscribeToOrgData((next) => {
+      setData(next);
+      setLastSynced(new Date());
+    });
+    return unsubscribe;
+  }, []);
+
   // Save org data to the shared database whenever it changes locally
   const persist = useCallback(async (next) => {
     setData(next);
@@ -646,7 +657,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
       </div>
       <div className="topbar-right">
         {syncedLabel && <span className="user-role synced-label" style={{ marginRight: 2 }}>{syncedLabel}</span>}
-        <button className="icon-btn" onClick={onSync} title="Sync with latest data" disabled={syncing}>
+        <button className="icon-btn" onClick={onSync} title="Force refresh (data syncs live automatically)" disabled={syncing}>
           <RefreshCw size={16} className={syncing ? "spin" : ""} />
         </button>
         <div className="notif-wrap">
@@ -1171,9 +1182,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
               <Trash2 size={14} /> Delete ({selected.length})
             </button>
           )}
-          <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleImportFile} />
-          <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import CSV</button>
-          <button className="btn ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
+          {isAdmin && (
+            <>
+              <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleImportFile} />
+              <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import CSV</button>
+              <button className="btn ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
+            </>
+          )}
           <button className="btn primary" onClick={() => setEditing(emptyAsset(scopedLocationId))}>
             <Plus size={14} /> New Asset
           </button>
@@ -1520,7 +1535,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
       <div className="modal-actions" style={{ marginTop: 16, flexWrap: "wrap" }}>
         <button
           type="button"
-          className="btn ghost danger"
+          className="btn danger-outline"
           onClick={onDelete}
           title={!isAdmin && asset.pendingDeletion ? "Awaiting Admin approval" : "Delete"}
           disabled={!isAdmin && !!asset.pendingDeletion}
@@ -2445,7 +2460,7 @@ function GlobalStyles() {
       .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; appearance: none; -webkit-appearance: none; font-family: inherit; }
       .btn.primary { background: var(--accent); color: white; }
       .btn.ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
-      .btn.ghost.danger { color: var(--danger); }
+      .btn.danger-outline { background: var(--surface); border-color: var(--danger); color: var(--danger); }
       .btn.danger { background: var(--danger); color: white; }
       .btn.full { width: 100%; justify-content: center; margin-top: 6px; }
       .btn:disabled { opacity: 0.5; cursor: not-allowed; }
