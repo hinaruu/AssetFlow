@@ -28,6 +28,17 @@ function sha256(text) {
 const uid = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const todayISO = () => new Date().toISOString().split("T")[0];
 
+// Generates the next sequential ASTUTE### tag when the Asset Tag field is left
+// blank — looks at existing tags matching the ASTUTE prefix and picks max+1.
+function nextAutoTag(assets) {
+  let max = 0;
+  (assets || []).forEach((a) => {
+    const m = /^ASTUTE(\d+)$/i.exec(String(a.tag || "").trim());
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  return `ASTUTE${String(max + 1).padStart(3, "0")}`;
+}
+
 // Appends an entry to the audit log, tagged with who did it and when.
 // Keeps only the most recent 300 entries so it doesn't grow forever.
 function withLog(data, currentUser, message) {
@@ -548,7 +559,7 @@ export default function App() {
           />
           <div className="content">
             {view === "dashboard" && (
-              <Dashboard data={data} scopedLocationId={scopedLocationId} />
+              <Dashboard data={data} scopedLocationId={scopedLocationId} currentUser={currentUser} />
             )}
             {view === "assets" && (
               <AssetsView
@@ -713,7 +724,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
 /* ---------------------------------------------------------
    Dashboard
 --------------------------------------------------------- */
-function Dashboard({ data, scopedLocationId }) {
+function Dashboard({ data, scopedLocationId, currentUser }) {
   const assets = scopedLocationId
     ? data.assets.filter((a) => a.locationId === scopedLocationId)
     : data.assets;
@@ -734,6 +745,14 @@ function Dashboard({ data, scopedLocationId }) {
     return Object.entries(counts).map(([name, value]) => ({ name, value }));
   }, [assets, data.categories]);
 
+  // Same index-based assignment as categoryColor() so the pie chart and the
+  // category dots shown in the tables always agree on a category's color.
+  const categoryPalette = useMemo(() => {
+    const map = {};
+    data.categories.forEach((c, i) => { map[c.name] = CAT_PALETTE[i % CAT_PALETTE.length]; });
+    return map;
+  }, [data.categories]);
+
   const totals = {
     total: assets.length,
     inUse: assets.filter((a) => a.status === "In Use").length,
@@ -743,8 +762,20 @@ function Dashboard({ data, scopedLocationId }) {
 
   const recent = [...assets].sort((a, b) => (b.tag > a.tag ? 1 : -1)).slice(0, 6);
 
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const firstName = (currentUser?.name || "").split(" ")[0] || "there";
+
   return (
     <div>
+      <div className="welcome-banner">
+        <div>
+          <h2>{greeting}, {firstName}</h2>
+          <p className="welcome-sub">Here's what's happening with your assets today.</p>
+        </div>
+        <div className="welcome-icon"><ShieldCheck size={26} /></div>
+      </div>
+
       <div className="metrics-row">
         <Metric label="Total Assets" value={totals.total} icon={Package} color="#6366F1" />
         <Metric label="In Use" value={totals.inUse} icon={CheckSquare} color={STATUS_COLORS["In Use"]} />
@@ -754,7 +785,7 @@ function Dashboard({ data, scopedLocationId }) {
 
       <div className="charts-row">
         <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} />
-        <DonutCard title="Assets by Category" data={categoryData} palette={null} />
+        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} />
       </div>
 
       <div className="panel">
@@ -926,7 +957,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
       }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`);
     } else {
-      const newAsset = { ...assetFields, id: uid("ast"), tag: assetFields.tag || `AST-${uid("X").slice(-6).toUpperCase()}` };
+      const newAsset = { ...assetFields, id: uid("ast"), tag: String(assetFields.tag || "").trim() || nextAutoTag(data.assets) };
       if (newAsset.status === "Under Repair") {
         autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       }
@@ -1226,9 +1257,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     onChange={(e) => setSelected(e.target.checked ? visibleAssets.map((a) => a.id) : [])}
                   />
                 </th>
+                <th>Category</th>
                 <th>Asset Tag</th>
                 <th>Name</th>
-                <th>Category</th>
                 <th>Location</th>
                 <th>Assigned User</th>
                 <th>Status</th>
@@ -1253,14 +1284,14 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                         }
                       />
                     </td>
-                    <td data-label="Asset Tag">
-                      <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
-                    </td>
-                    <td data-label="Name">{a.name}</td>
                     <td data-label="Category">
                       {cat && <span className="cat-dot" style={{ background: categoryColor(data.categories, a.categoryId) }} />}
                       {cat?.name || "—"}
                     </td>
+                    <td data-label="Asset Tag">
+                      <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
+                    </td>
+                    <td data-label="Name">{a.name}</td>
                     <td data-label="Location">{loc?.name || "—"}</td>
                     <td data-label="Assigned User">{a.assignedTo || "—"}</td>
                     <td data-label="Status">
@@ -1419,7 +1450,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
     <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={560}>
       <div className="form-grid">
         <Field label="Asset Tag">
-          <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated if left blank" />
+          <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated (e.g. ASTUTE001) if left blank" />
         </Field>
         <Field label="Asset Type">
           <select value={form.assetType} onChange={(e) => set("assetType", e.target.value)}>
@@ -1516,18 +1547,23 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
 function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
-  const row = (label, value) => (
-    <div className="detail-row">
+  const row = (label, value, full) => (
+    <div className={`detail-row${full ? " detail-full" : ""}`}>
       <span className="detail-label">{label}</span>
       <span className="detail-value">{value || "—"}</span>
     </div>
   );
   return (
-    <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={560}>
+    <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={760}>
       <div className="detail-grid">
         {row("Name", asset.name)}
+        {row("Category", cat && (
+          <span style={{ display: "inline-flex", alignItems: "center" }}>
+            <span className="cat-dot" style={{ background: categoryColor(categories, asset.categoryId) }} />
+            {cat.name}
+          </span>
+        ))}
         {row("Asset Type", asset.assetType)}
-        {row("Category", cat?.name)}
         {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
         {row("Serial Number", asset.serial)}
         {row("Status", <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>)}
@@ -1540,7 +1576,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
         {asset.assetType === "Non-IT" && row("Requires Calibration?", asset.requiresCalibration ? "Yes" : "No")}
         {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Calibration Date", asset.calibrationDate)}
         {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Next Recalibration Date", asset.nextCalibrationDate)}
-        {row("Notes", asset.notes)}
+        {row("Notes", asset.notes, true)}
       </div>
 
       {asset.transferHistory && asset.transferHistory.length > 0 && (
@@ -1554,7 +1590,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
         </div>
       )}
 
-      <div className="modal-actions" style={{ marginTop: 16, flexWrap: "wrap" }}>
+      <div className="modal-actions" style={{ marginTop: 18, justifyContent: "space-between" }}>
         <button
           type="button"
           className="btn danger-outline"
@@ -1564,12 +1600,12 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
         >
           <Trash2 size={14} /> Delete
         </button>
-        <button type="button" className="btn ghost" onClick={onDuplicate}><Copy size={14} /> Duplicate</button>
-        <button type="button" className="btn ghost" onClick={onTransfer}><Truck size={14} /> Transfer</button>
-        <button type="button" className="btn primary" onClick={onEdit}><Pencil size={14} /> Edit</button>
-      </div>
-      <div className="modal-actions" style={{ marginTop: 8 }}>
-        <button type="button" className="btn ghost" onClick={onClose} style={{ width: "100%", justifyContent: "center" }}>Close</button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn ghost" onClick={onDuplicate}><Copy size={14} /> Duplicate</button>
+          <button type="button" className="btn ghost" onClick={onTransfer}><Truck size={14} /> Transfer</button>
+          <button type="button" className="btn ghost" onClick={onClose}>Close</button>
+          <button type="button" className="btn primary" onClick={onEdit}><Pencil size={14} /> Edit</button>
+        </div>
       </div>
     </Modal>
   );
@@ -2434,15 +2470,21 @@ function GlobalStyles() {
       .notif-item.urgent { color: var(--danger); font-weight: 600; }
       .notif-empty { font-size: 12.5px; color: var(--text-soft); padding: 4px 0 8px; }
 
-      .detail-grid { display: flex; flex-direction: column; gap: 0; }
+      .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
       .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
       .detail-row:last-child { border-bottom: none; }
+      .detail-row.detail-full { grid-column: 1 / -1; }
       .detail-label { color: var(--text-soft); font-weight: 500; }
       .detail-value { font-weight: 600; text-align: right; }
       .detail-transfer-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 
       .content { padding: 24px; flex: 1; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; }
       .content::-webkit-scrollbar { display: none; }
+
+      .welcome-banner { display: flex; align-items: center; justify-content: space-between; background: var(--accent-soft); border-radius: 16px; padding: 20px 24px; margin-bottom: 18px; gap: 16px; }
+      .welcome-banner h2 { font-size: 20px; color: var(--text); }
+      .welcome-sub { font-size: 13px; color: var(--text-soft); margin: 4px 0 0; }
+      .welcome-icon { width: 52px; height: 52px; border-radius: 14px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
       .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
       .metric { background: var(--surface); border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
@@ -2544,10 +2586,14 @@ function GlobalStyles() {
         .user-meta { display: none; }
         .user-chip { padding: 4px; }
         .metrics-row { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .welcome-banner { padding: 16px 18px; border-radius: 14px; }
+        .welcome-banner h2 { font-size: 17px; }
+        .welcome-icon { width: 42px; height: 42px; border-radius: 12px; }
         .metric { padding: 12px 14px; }
         .metric-value { font-size: 21px; }
         .charts-row { grid-template-columns: 1fr; }
         .form-grid { grid-template-columns: 1fr; }
+        .detail-grid { grid-template-columns: 1fr; }
         .search-box { width: 100%; }
         .view-head { flex-direction: column; align-items: stretch; }
         .view-actions { flex-wrap: wrap; }
