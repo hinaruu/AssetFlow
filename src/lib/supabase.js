@@ -57,7 +57,7 @@ const TABLES = {
     toRow: (a) => ({
       id: a.id, tag: a.tag || null, name: a.name || null,
       category_id: a.categoryId || null, asset_type: a.assetType || null,
-      brand: a.brand || null, model: a.model || null, serial: a.serial || null,
+      brand: a.brand || null, model: a.model || null, year_model: a.yearModel || null, serial: a.serial || null,
       status: a.status || null, condition: a.condition || null,
       location_id: a.locationId || null, assigned_to: a.assignedTo || null,
       purchase_date: a.purchaseDate || null, purchase_cost: num(a.purchaseCost),
@@ -71,7 +71,7 @@ const TABLES = {
     }),
     fromRow: (r) => ({
       id: r.id, tag: r.tag, name: r.name, categoryId: r.category_id, assetType: r.asset_type,
-      brand: r.brand, model: r.model, serial: r.serial, status: r.status, condition: r.condition,
+      brand: r.brand, model: r.model, yearModel: r.year_model, serial: r.serial, status: r.status, condition: r.condition,
       locationId: r.location_id, assignedTo: r.assigned_to,
       purchaseDate: r.purchase_date, purchaseCost: r.purchase_cost, warrantyExpiry: r.warranty_expiry,
       requiresCalibration: r.requires_calibration, calibrationDate: r.calibration_date,

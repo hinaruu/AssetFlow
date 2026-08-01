@@ -41,6 +41,7 @@ create table if not exists assets (
   asset_type text,              -- 'IT' | 'Non-IT'
   brand text,
   model text,
+  year_model text,
   serial text,
   status text,
   condition text,
@@ -150,14 +151,14 @@ on conflict (id) do update set
   location_id = excluded.location_id, password_hash = excluded.password_hash;
 
 insert into assets (
-  id, tag, name, category_id, asset_type, brand, model, serial, status, condition,
+  id, tag, name, category_id, asset_type, brand, model, year_model, serial, status, condition,
   location_id, assigned_to, purchase_date, purchase_cost, warranty_expiry,
   requires_calibration, calibration_date, next_calibration_date, notes,
   pre_repair_status, transfer_history
 )
 select
   a->>'id', a->>'tag', a->>'name', nullif(a->>'categoryId', ''), a->>'assetType',
-  a->>'brand', a->>'model', a->>'serial', a->>'status', a->>'condition',
+  a->>'brand', a->>'model', a->>'yearModel', a->>'serial', a->>'status', a->>'condition',
   nullif(a->>'locationId', ''), a->>'assignedTo',
   nullif(a->>'purchaseDate','')::date, nullif(a->>'purchaseCost','')::numeric,
   nullif(a->>'warrantyExpiry','')::date,
@@ -170,6 +171,7 @@ where id = 1
 on conflict (id) do update set
   tag = excluded.tag, name = excluded.name, category_id = excluded.category_id,
   asset_type = excluded.asset_type, brand = excluded.brand, model = excluded.model,
+  year_model = excluded.year_model,
   serial = excluded.serial, status = excluded.status, condition = excluded.condition,
   location_id = excluded.location_id, assigned_to = excluded.assigned_to,
   purchase_date = excluded.purchase_date, purchase_cost = excluded.purchase_cost,

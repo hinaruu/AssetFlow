@@ -4,6 +4,7 @@ import {
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
   KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
+  ChevronUp, ChevronDown, ChevronsUpDown,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
@@ -899,7 +900,7 @@ function DonutCard({ title, data, palette }) {
 function emptyAsset(defaultLocationId) {
   return {
     id: null, tag: "", name: "", categoryId: "", assetType: "IT", brand: "", model: "",
-    serial: "", status: "In Stock", condition: "New", locationId: defaultLocationId || "",
+    yearModel: "", serial: "", status: "", condition: "New", locationId: defaultLocationId || "",
     assignedTo: "", purchaseDate: todayISO(), purchaseCost: "", warrantyExpiry: "",
     requiresCalibration: false, calibrationDate: "", nextCalibrationDate: "",
     notes: "", transferHistory: [],
@@ -924,6 +925,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [transferNewLocationName, setTransferNewLocationName] = useState("");
   const [transferAssignedTo, setTransferAssignedTo] = useState("");
   const [transferReason, setTransferReason] = useState("");
+  const [sort, setSort] = useState({ key: null, dir: "asc" });
   const fileInputRef = React.useRef(null);
 
   // Regional Staff should only see assigned-user names from their own
@@ -953,6 +955,43 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
     return list;
   }, [data.assets, data.locations, data.categories, scopedLocationId, search, locationFilter, categoryFilter, userFilter]);
+
+  const sortedAssets = useMemo(() => {
+    if (!sort.key) return visibleAssets;
+    const getVal = (a) => {
+      switch (sort.key) {
+        case "category": return data.categories.find((c) => c.id === a.categoryId)?.name || "";
+        case "tag": return a.tag || "";
+        case "name": return a.name || "";
+        case "location": return data.locations.find((l) => l.id === a.locationId)?.name || "";
+        case "assignedTo": return a.assignedTo || "";
+        case "status": return a.status || "";
+        case "condition": return a.condition || "";
+        default: return "";
+      }
+    };
+    const list = [...visibleAssets];
+    list.sort((a, b) => {
+      const cmp = String(getVal(a)).localeCompare(String(getVal(b)), undefined, { sensitivity: "base" });
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
+    return list;
+  }, [visibleAssets, sort, data.categories, data.locations]);
+
+  const toggleSort = (key) => {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  };
+
+  const SortTh = ({ label, sortKey, style }) => (
+    <th style={style}>
+      <button type="button" className="sort-th-btn" onClick={() => toggleSort(sortKey)}>
+        {label}
+        {sort.key === sortKey
+          ? (sort.dir === "asc" ? <ChevronUp size={13} /> : <ChevronDown size={13} />)
+          : <ChevronsUpDown size={13} className="sort-th-idle" />}
+      </button>
+    </th>
+  );
 
   const save = async (asset) => {
     const { repairReason, ...assetFields } = asset;
@@ -1110,12 +1149,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
   };
 
-  const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
+  const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "yearModel", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
 
   const buildCSV = () => {
     const rows = visibleAssets.map((a) => {
       const loc = data.locations.find((l) => l.id === a.locationId)?.name || "";
-      return [a.tag, a.name, a.assetType, a.brand, a.model, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.requiresCalibration ? "Yes" : "No", a.calibrationDate, a.nextCalibrationDate];
+      return [a.tag, a.name, a.assetType, a.brand, a.model, a.yearModel, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.requiresCalibration ? "Yes" : "No", a.calibrationDate, a.nextCalibrationDate];
     });
     return [EXPORT_COLS.join(","), ...rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
   };
@@ -1192,6 +1231,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
             assetType: row.assetType === "Non-IT" ? "Non-IT" : "IT",
             brand: row.brand || "",
             model: row.model || "",
+            yearModel: row.yearModel || "",
             serial: row.serial || "",
             status: STATUS_OPTIONS.includes(row.status) ? row.status : "In Stock",
             condition: CONDITION_OPTIONS.includes(row.condition) ? row.condition : "Good",
@@ -1273,22 +1313,23 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     onChange={(e) => setSelected(e.target.checked ? visibleAssets.map((a) => a.id) : [])}
                   />
                 </th>
-                <th>Category</th>
-                <th>Asset Tag</th>
-                <th>Name</th>
-                <th>Location</th>
-                <th>Assigned User</th>
-                <th>Status</th>
-                <th>Condition</th>
+                <SortTh label="Category" sortKey="category" />
+                <SortTh label="Asset Tag" sortKey="tag" />
+                <SortTh label="Name" sortKey="name" />
+                <SortTh label="Location" sortKey="location" />
+                <SortTh label="Assigned User" sortKey="assignedTo" />
+                <SortTh label="Status" sortKey="status" />
+                <SortTh label="Condition" sortKey="condition" />
               </tr>
             </thead>
             <tbody>
               {visibleAssets.length === 0 && (
                 <tr><td colSpan={8} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
               )}
-              {visibleAssets.map((a) => {
+              {sortedAssets.map((a) => {
                 const cat = data.categories.find((c) => c.id === a.categoryId);
                 const loc = data.locations.find((l) => l.id === a.locationId);
+                const brandModel = [a.brand, a.model].filter(Boolean).join(" / ");
                 return (
                   <tr key={a.id}>
                     <td className="checkbox-cell">
@@ -1307,7 +1348,10 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     <td data-label="Asset Tag">
                       <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
                     </td>
-                    <td data-label="Name">{a.name}</td>
+                    <td data-label="Name">
+                      {a.name}
+                      {brandModel && <div className="name-subtext">{brandModel}</div>}
+                    </td>
                     <td data-label="Location">{loc?.name || "—"}</td>
                     <td data-label="Assigned User">{a.assignedTo || "—"}</td>
                     <td data-label="Status">
@@ -1334,6 +1378,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           locations={data.locations}
           isAdmin={isAdmin}
           scopedLocationId={scopedLocationId}
+          existingAssets={data.assets}
           onClose={() => setEditing(null)}
           onSave={save}
         />
@@ -1346,7 +1391,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         />
       )}
       {requestDeleteTarget && (
-        <Modal title="Request Deletion" onClose={() => { setRequestDeleteTarget(null); setDeleteReason(""); }} width={440}>
+        <Modal title="Request Deletion" onClose={() => { setRequestDeleteTarget(null); setDeleteReason(""); }} width={760}>
           <div className="form-grid">
             <div className="form-full hint-box">
               This asset won't be deleted right away — your request and reason go to an
@@ -1390,7 +1435,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         />
       )}
       {transferTarget && (
-        <Modal title="Transfer Asset" onClose={() => setTransferTarget(null)} width={440}>
+        <Modal title="Transfer Asset" onClose={() => setTransferTarget(null)} width={760}>
           <div className="form-grid">
             <div className="form-full hint-box">
               Moving this asset to a different location will be recorded in its history along with your reason.
@@ -1442,12 +1487,24 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   );
 }
 
-function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, onClose, onSave }) {
+function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, onClose, onSave }) {
   const [form, setForm] = useState(asset);
+  const [hasPurchaseInfo, setHasPurchaseInfo] = useState(!!(asset.purchaseDate || asset.purchaseCost));
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
   const wasUnderRepair = asset.status === "Under Repair";
   const needsReason = form.status === "Under Repair" && !wasUnderRepair;
+
+  // Typing an Assigned To name is a strong signal the asset is in use — set
+  // it automatically, but only if the user hasn't already picked a status
+  // themselves, so we never override a deliberate choice.
+  const onAssignedToChange = (v) => {
+    setForm((f) => ({
+      ...f,
+      assignedTo: v,
+      status: !f.status && v.trim() ? "In Use" : f.status,
+    }));
+  };
 
   const submit = (e) => {
     if (e && e.preventDefault) e.preventDefault();
@@ -1455,15 +1512,37 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
       alert("Please enter an asset name.");
       return;
     }
+    if (!form.categoryId) {
+      alert("Please select a category.");
+      return;
+    }
+    if (!form.status) {
+      alert("Please select a status.");
+      return;
+    }
+    const tag = String(form.tag || "").trim();
+    if (tag) {
+      const dup = (existingAssets || []).find(
+        (a) => a.id !== form.id && String(a.tag || "").trim().toLowerCase() === tag.toLowerCase()
+      );
+      if (dup) {
+        alert(`Asset Tag "${tag}" is already used by "${dup.name || "another asset"}". Please use a unique tag.`);
+        return;
+      }
+    }
     if (needsReason && !(form.repairReason || "").trim()) {
       alert("Please enter a reason — this creates the matching Maintenance entry.");
       return;
     }
-    onSave(form);
+    onSave({
+      ...form,
+      purchaseDate: hasPurchaseInfo ? form.purchaseDate : "",
+      purchaseCost: hasPurchaseInfo ? form.purchaseCost : "",
+    });
   };
 
   return (
-    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={560}>
+    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={760}>
       <div className="form-grid">
         <Field label="Asset Tag">
           <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated (e.g. ASTUTE001) if left blank" />
@@ -1477,8 +1556,8 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
         <Field label="Name">
           <input value={form.name} onChange={(e) => set("name", e.target.value)} required />
         </Field>
-        <Field label="Category">
-          <select value={form.categoryId} onChange={(e) => set("categoryId", e.target.value)}>
+        <Field label="Category (required)">
+          <select value={form.categoryId} onChange={(e) => set("categoryId", e.target.value)} required>
             <option value="">Select category</option>
             {categories.filter((c) => c.type === form.assetType).map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
@@ -1487,6 +1566,16 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
         </Field>
         <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} /></Field>
         <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} /></Field>
+        <Field label="Manufactured Year / Year Model">
+          <input
+            type="number"
+            value={form.yearModel}
+            onChange={(e) => set("yearModel", e.target.value)}
+            placeholder="e.g. 2024"
+            min="1990"
+            max="2100"
+          />
+        </Field>
         <Field label="Serial Number">
           <div className="field-inline">
             <input value={form.serial} onChange={(e) => set("serial", e.target.value)} />
@@ -1508,8 +1597,9 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
             </button>
           </div>
         </Field>
-        <Field label="Status">
-          <select value={form.status} onChange={(e) => set("status", e.target.value)}>
+        <Field label="Status (required)">
+          <select value={form.status} onChange={(e) => set("status", e.target.value)} required>
+            <option value="">Select status</option>
             {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </Field>
@@ -1537,9 +1627,21 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
             {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
         </Field>
-        <Field label="Assigned To"><input value={form.assignedTo} onChange={(e) => set("assignedTo", e.target.value)} /></Field>
-        <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
-        <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
+        <Field label="Assigned To">
+          <input value={form.assignedTo} onChange={(e) => onAssignedToChange(e.target.value)} />
+        </Field>
+        <Field label="Add Purchase Info?">
+          <select value={hasPurchaseInfo ? "yes" : "no"} onChange={(e) => setHasPurchaseInfo(e.target.value === "yes")}>
+            <option value="no">No</option>
+            <option value="yes">Yes</option>
+          </select>
+        </Field>
+        {hasPurchaseInfo && (
+          <>
+            <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
+            <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
+          </>
+        )}
         {form.assetType === "IT" ? (
           <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
         ) : (
@@ -1601,6 +1703,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
         ))}
         {row("Asset Type", asset.assetType)}
         {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
+        {row("Manufactured Year / Year Model", asset.yearModel)}
         {row("Serial Number", asset.serial)}
         {row("Status", <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>)}
         {row("Condition", asset.condition)}
@@ -1795,7 +1898,7 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
       </div>
 
       {editing && (
-        <Modal title={editing.id ? "Edit Maintenance Entry" : "New Maintenance Entry"} onClose={() => setEditing(null)} width={620}>
+        <Modal title={editing.id ? "Edit Maintenance Entry" : "New Maintenance Entry"} onClose={() => setEditing(null)} width={760}>
           <MaintForm entry={editing} assets={assetsInScope} onSave={save} onClose={() => setEditing(null)} />
         </Modal>
       )}
@@ -2594,6 +2697,9 @@ function GlobalStyles() {
       .field-inline input { flex: 1; min-width: 120px; }
       .sn-check-btn { white-space: nowrap; padding: 0 10px; font-size: 12px; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+      .sort-th-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; padding: 0; font: inherit; font-weight: inherit; color: inherit; cursor: pointer; }
+      .sort-th-idle { opacity: 0.35; }
+      .name-subtext { font-size: 11.5px; color: var(--text-soft); font-weight: 400; margin-top: 2px; }
       .hint-box { background: var(--accent-soft); color: var(--accent); font-size: 12px; padding: 10px 12px; border-radius: 8px; }
 
       .spin { animation: spin 0.8s linear infinite; }
