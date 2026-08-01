@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
   KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
-  Bell, Copy, Truck, CheckSquare, Archive,
+  Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
@@ -121,6 +121,21 @@ const CAT_PALETTE = ["#6366F1", "#10B981", "#F59E0B", "#EC4899", "#06B6D4", "#8B
 function categoryColor(categories, categoryId) {
   const idx = categories.findIndex((c) => c.id === categoryId);
   return idx >= 0 ? CAT_PALETTE[idx % CAT_PALETTE.length] : "#9CA3AF";
+}
+
+// Known vendor warranty/spec lookup pages, matched against the asset's Brand
+// field. Falls back to a general search when the brand isn't recognized.
+const WARRANTY_LOOKUP_URLS = {
+  lenovo: "https://pcsupport.lenovo.com/us/en/warranty-lookup",
+  dell: "https://www.dell.com/support/home/en-us/product-support/servicetag/",
+  hp: "https://support.hp.com/us-en/checkwarranty",
+  apple: "https://checkcoverage.apple.com/",
+};
+function warrantyLookupUrl(brand, serial) {
+  const key = Object.keys(WARRANTY_LOOKUP_URLS).find((k) => (brand || "").toLowerCase().includes(k));
+  if (key) return WARRANTY_LOOKUP_URLS[key];
+  const q = [brand, serial, "warranty lookup"].filter(Boolean).join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
 }
 
 function seedData() {
@@ -1471,7 +1486,27 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
         </Field>
         <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} /></Field>
         <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} /></Field>
-        <Field label="Serial Number"><input value={form.serial} onChange={(e) => set("serial", e.target.value)} /></Field>
+        <Field label="Serial Number">
+          <div className="field-inline">
+            <input value={form.serial} onChange={(e) => set("serial", e.target.value)} />
+            <button
+              type="button"
+              className="btn ghost sn-check-btn"
+              title="Copy the serial number and open the vendor's warranty lookup in a side window"
+              onClick={() => {
+                if (form.serial && navigator.clipboard?.writeText) {
+                  navigator.clipboard.writeText(form.serial).catch(() => {});
+                }
+                const w = 480, h = 760;
+                const left = (window.screenX || 0) + (window.outerWidth || w);
+                const top = window.screenY || 0;
+                window.open(warrantyLookupUrl(form.brand, form.serial), "snChecker", `width=${w},height=${h},left=${left},top=${top}`);
+              }}
+            >
+              <ExternalLink size={13} /> Check S/N
+            </button>
+          </div>
+        </Field>
         <Field label="Status">
           <select value={form.status} onChange={(e) => set("status", e.target.value)}>
             {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -2554,6 +2589,9 @@ function GlobalStyles() {
         background: var(--bg); color: var(--text); font-family: inherit;
       }
       .field input:disabled, .field select:disabled, .field textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+      .field-inline { display: flex; gap: 6px; flex-wrap: wrap; }
+      .field-inline input { flex: 1; min-width: 120px; }
+      .sn-check-btn { white-space: nowrap; padding: 0 10px; font-size: 12px; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
       .hint-box { background: var(--accent-soft); color: var(--accent); font-size: 12px; padding: 10px 12px; border-radius: 8px; }
 
