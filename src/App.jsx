@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  ChevronLeft, ChevronRight, KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
+  KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
   Bell, Copy, Truck,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
@@ -40,6 +40,27 @@ function withLog(data, currentUser, message) {
   };
   const auditLog = [entry, ...(data.auditLog || [])].slice(0, 300);
   return { ...data, auditLog };
+}
+
+// Marks an asset "Under Repair", remembering its prior status so it can be
+// restored once all its open maintenance work is done. No-op if it's
+// already Under Repair.
+function markUnderRepair(assets, assetId) {
+  return assets.map((a) => {
+    if (a.id !== assetId || a.status === "Under Repair") return a;
+    return { ...a, preRepairStatus: a.status, status: "Under Repair" };
+  });
+}
+
+// After a maintenance entry is closed/removed, checks whether the asset
+// still has other open (non-"Done") maintenance entries. If not, restores
+// its pre-repair status.
+function maybeRestoreStatus(assets, maintenance, assetId) {
+  const stillOpen = maintenance.some((m) => m.assetId === assetId && m.status !== "Done");
+  if (stillOpen) return assets;
+  return assets.map((a) => (a.id === assetId && a.status === "Under Repair"
+    ? { ...a, status: a.preRepairStatus || "In Use", preRepairStatus: null }
+    : a));
 }
 
 // Builds the list of "upcoming attention needed" items shown in the
@@ -574,9 +595,6 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
         <div className="sidebar-top">
           {open && <div className="brand"><ShieldCheck size={18} /><span>AssetFlow</span></div>}
           {!open && <div className="brand-mini"><ShieldCheck size={18} /></div>}
-          <button className="icon-btn" onClick={onToggle} title="Toggle menu">
-            {open ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
-          </button>
         </div>
         <nav>
           {items.map((it) => (
@@ -665,7 +683,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
           <div className="avatar">{currentUser.name.split(" ").map((s) => s[0]).slice(0, 2).join("")}</div>
           <div className="user-meta">
             <div className="user-name">{currentUser.name}</div>
-            <div className="user-role">{currentUser.role}</div>
+            <div className="user-role">{currentUser.position || currentUser.role}</div>
           </div>
         </div>
         <button className="icon-btn" onClick={onLogout} title="Log out"><LogOut size={16} /></button>
@@ -864,22 +882,27 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   }, [data.assets, data.locations, data.categories, scopedLocationId, search, locationFilter, categoryFilter, userFilter]);
 
   const save = async (asset) => {
+    const { repairReason, ...assetFields } = asset;
     let next;
     let autoMaint = null;
-    if (asset.id) {
-      const prev = data.assets.find((a) => a.id === asset.id);
-      if (asset.status === "Under Repair" && prev?.status !== "Under Repair") {
-        autoMaint = { id: uid("maint"), assetId: asset.id, description: "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+    if (assetFields.id) {
+      const prev = data.assets.find((a) => a.id === assetFields.id);
+      let finalAsset = assetFields;
+      if (assetFields.status === "Under Repair" && prev?.status !== "Under Repair") {
+        finalAsset = { ...assetFields, preRepairStatus: prev?.status || "In Use" };
+        autoMaint = { id: uid("maint"), assetId: assetFields.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+      } else if (assetFields.status !== "Under Repair" && prev?.status === "Under Repair") {
+        finalAsset = { ...assetFields, preRepairStatus: null };
       }
       next = withLog({
         ...data,
-        assets: data.assets.map((a) => (a.id === asset.id ? asset : a)),
+        assets: data.assets.map((a) => (a.id === assetFields.id ? finalAsset : a)),
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
-      }, currentUser, `Edited asset "${asset.name || asset.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`);
+      }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`);
     } else {
-      const newAsset = { ...asset, id: uid("ast"), tag: asset.tag || `AST-${uid("X").slice(-6).toUpperCase()}` };
+      const newAsset = { ...assetFields, id: uid("ast"), tag: assetFields.tag || `AST-${uid("X").slice(-6).toUpperCase()}` };
       if (newAsset.status === "Under Repair") {
-        autoMaint = { id: uid("maint"), assetId: newAsset.id, description: "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+        autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       }
       next = withLog({
         ...data,
@@ -1339,10 +1362,17 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
   const [form, setForm] = useState(asset);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
+  const wasUnderRepair = asset.status === "Under Repair";
+  const needsReason = form.status === "Under Repair" && !wasUnderRepair;
+
   const submit = (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!form.name.trim()) {
       alert("Please enter an asset name.");
+      return;
+    }
+    if (needsReason && !(form.repairReason || "").trim()) {
+      alert("Please enter a reason — this creates the matching Maintenance entry.");
       return;
     }
     onSave(form);
@@ -1379,6 +1409,19 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, o
             {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </Field>
+        {needsReason && (
+          <div className="form-full">
+            <Field label="Reason for Repair">
+              <textarea
+                value={form.repairReason || ""}
+                onChange={(e) => set("repairReason", e.target.value)}
+                rows={2}
+                placeholder="What's wrong with it? This becomes the Maintenance entry."
+                autoFocus
+              />
+            </Field>
+          </div>
+        )}
         <Field label="Condition">
           <select value={form.condition} onChange={(e) => set("condition", e.target.value)}>
             {CONDITION_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -1517,9 +1560,17 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
   const save = async (log) => {
     let next;
     if (log.id) {
-      next = withLog({ ...data, maintenance: data.maintenance.map((m) => (m.id === log.id ? log : m)) }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`);
+      const maintenance = data.maintenance.map((m) => (m.id === log.id ? log : m));
+      const assets = log.status === "Done"
+        ? maybeRestoreStatus(data.assets, maintenance, log.assetId)
+        : markUnderRepair(data.assets, log.assetId);
+      next = withLog({ ...data, assets, maintenance }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`);
     } else {
-      next = withLog({ ...data, maintenance: [{ ...log, id: uid("maint") }, ...data.maintenance] }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}`);
+      const newEntry = { ...log, id: uid("maint") };
+      const maintenance = [newEntry, ...data.maintenance];
+      const assets = newEntry.status === "Done" ? data.assets : markUnderRepair(data.assets, newEntry.assetId);
+      const becameUnderRepair = newEntry.status !== "Done" && data.assets.find((a) => a.id === newEntry.assetId)?.status !== "Under Repair";
+      next = withLog({ ...data, assets, maintenance }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}${becameUnderRepair ? " — asset set to Under Repair" : ""}`);
     }
     persist(next);
     setEditing(null);
@@ -1528,14 +1579,20 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
 
   const remove = async (id) => {
     const log = data.maintenance.find((m) => m.id === id);
-    const next = withLog({ ...data, maintenance: data.maintenance.filter((m) => m.id !== id) }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`);
+    const maintenance = data.maintenance.filter((m) => m.id !== id);
+    const assets = maybeRestoreStatus(data.assets, maintenance, log?.assetId);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`);
     persist(next);
     setConfirmDelete(null);
     showToast("Maintenance entry deleted.");
   };
 
   const bulkDelete = async () => {
-    const next = withLog({ ...data, maintenance: data.maintenance.filter((m) => !selected.includes(m.id)) }, currentUser, `Deleted ${selected.length} maintenance entry(ies) in bulk`);
+    const affectedAssetIds = [...new Set(data.maintenance.filter((m) => selected.includes(m.id)).map((m) => m.assetId))];
+    const maintenance = data.maintenance.filter((m) => !selected.includes(m.id));
+    let assets = data.assets;
+    affectedAssetIds.forEach((aid) => { assets = maybeRestoreStatus(assets, maintenance, aid); });
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted ${selected.length} maintenance entry(ies) in bulk`);
     persist(next);
     showToast(`${selected.length} entry(ies) deleted.`);
     setSelected([]);
@@ -1543,7 +1600,11 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
 
   const quickStatus = async (id, status) => {
     const log = data.maintenance.find((m) => m.id === id);
-    const next = withLog({ ...data, maintenance: data.maintenance.map((m) => (m.id === id ? { ...m, status } : m)) }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`);
+    const maintenance = data.maintenance.map((m) => (m.id === id ? { ...m, status } : m));
+    const assets = status === "Done"
+      ? maybeRestoreStatus(data.assets, maintenance, log?.assetId)
+      : markUnderRepair(data.assets, log?.assetId);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`);
     persist(next);
   };
 
@@ -2300,12 +2361,12 @@ function GlobalStyles() {
       .form-error { background: #FEE2E2; color: #B91C1C; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; margin-bottom: 12px; }
 
       .shell { display: flex; min-height: 100vh; }
-      .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.18s ease; flex-shrink: 0; }
+      .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.18s ease; flex-shrink: 0; overflow: hidden; }
       .sidebar.collapsed { width: 64px; }
-      .sidebar-top { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--border); }
+      .sidebar-top { display: flex; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
       .brand { display: flex; align-items: center; gap: 8px; font-family: 'Sora', sans-serif; font-weight: 700; color: var(--accent); white-space: nowrap; }
       .brand-mini { display: flex; align-items: center; justify-content: center; color: var(--accent); width: 100%; }
-      nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; }
+      nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
       .nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: none; background: none; color: var(--text-soft); cursor: pointer; font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; }
       .nav-item:hover { background: var(--accent-soft); color: var(--accent); }
       .nav-item.active { background: var(--accent-soft); color: var(--accent); }
@@ -2315,8 +2376,8 @@ function GlobalStyles() {
       .topbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
       .topbar-region { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-soft); background: var(--bg); padding: 6px 12px; border-radius: 999px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .topbar-right { display: flex; align-items: center; gap: 10px; }
-      .mobile-menu-btn { display: none; flex-shrink: 0; }
-      .user-chip { display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 999px; background: var(--bg); }
+      .mobile-menu-btn { display: flex; flex-shrink: 0; }
+      .user-chip { display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); }
       .avatar { width: 28px; height: 28px; border-radius: 999px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
       .user-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; }
       .user-role { font-size: 11px; color: var(--text-soft); }
@@ -2381,12 +2442,13 @@ function GlobalStyles() {
       .export-hint { font-size: 12.5px; color: var(--text-soft); margin-bottom: 10px; }
       .export-textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--bg); color: var(--text); resize: vertical; }
 
-      .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; }
+      .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; appearance: none; -webkit-appearance: none; font-family: inherit; }
       .btn.primary { background: var(--accent); color: white; }
       .btn.ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
       .btn.ghost.danger { color: var(--danger); }
       .btn.danger { background: var(--danger); color: white; }
       .btn.full { width: 100%; justify-content: center; margin-top: 6px; }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
       .icon-btn { display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text-soft); cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease; }
       .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
@@ -2429,11 +2491,9 @@ function GlobalStyles() {
       @keyframes modalIn { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 
       @media (max-width: 860px) {
-        .mobile-menu-btn { display: flex; }
-        .sidebar { position: fixed; z-index: 70; height: 100vh; top: 0; left: 0; width: 240px; transform: translateX(-100%); box-shadow: 0 0 0 rgba(0,0,0,0); transition: transform 0.2s ease; }
+        .sidebar { position: fixed; z-index: 70; height: 100vh; height: 100dvh; top: 0; left: 0; width: 240px; transform: translateX(-100%); box-shadow: 0 0 0 rgba(0,0,0,0); transition: transform 0.2s ease; }
         .sidebar:not(.collapsed) { transform: translateX(0); box-shadow: 12px 0 32px rgba(0,0,0,0.18); }
         .sidebar.collapsed { width: 240px; }
-        .sidebar.collapsed .sidebar-top button.icon-btn { display: none; }
         .sidebar-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 65; }
         .main { width: 100%; }
         .content { padding: 14px; }
