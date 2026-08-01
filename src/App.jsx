@@ -458,9 +458,10 @@ export default function App() {
 
   // Save org data to the shared database whenever it changes locally
   const persist = useCallback(async (next) => {
+    const prev = dataRef.current;
     setData(next);
     try {
-      await saveOrgData(next);
+      await saveOrgData(next, prev);
       setLastSynced(new Date());
     } catch {
       showToast("Could not save — check your connection and try again.");

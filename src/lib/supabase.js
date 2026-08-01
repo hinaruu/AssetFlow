@@ -13,62 +13,170 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl || "", supabaseAnonKey || "");
 
-const ROW_ID = 1;
+/* ---------------------------------------------------------
+   Row <-> app-object mapping.
+   The app still works with the exact same camelCase shape it
+   always has ({ locations, categories, users, assets, maintenance,
+   auditLog }) — only how it gets in/out of the database changed.
+--------------------------------------------------------- */
+
+const TABLES = {
+  locations: {
+    table: "locations",
+    toRow: (l) => ({ id: l.id, name: l.name }),
+    fromRow: (r) => ({ id: r.id, name: r.name }),
+  },
+  categories: {
+    table: "categories",
+    toRow: (c) => ({ id: c.id, name: c.name, type: c.type, useful_life: c.usefulLife ?? null }),
+    fromRow: (r) => ({ id: r.id, name: r.name, type: r.type, usefulLife: r.useful_life }),
+  },
+  users: {
+    table: "users",
+    toRow: (u) => ({
+      id: u.id, name: u.name, username: u.username, email: u.email || null,
+      position: u.position || null, role: u.role,
+      location_id: u.locationId || null, password_hash: u.passwordHash,
+    }),
+    fromRow: (r) => ({
+      id: r.id, name: r.name, username: r.username, email: r.email,
+      position: r.position, role: r.role, locationId: r.location_id, passwordHash: r.password_hash,
+    }),
+  },
+  assets: {
+    table: "assets",
+    toRow: (a) => ({
+      id: a.id, tag: a.tag || null, name: a.name || null,
+      category_id: a.categoryId || null, asset_type: a.assetType || null,
+      brand: a.brand || null, model: a.model || null, serial: a.serial || null,
+      status: a.status || null, condition: a.condition || null,
+      location_id: a.locationId || null, assigned_to: a.assignedTo || null,
+      purchase_date: a.purchaseDate || null, purchase_cost: a.purchaseCost ?? null,
+      warranty_expiry: a.warrantyExpiry || null,
+      requires_calibration: !!a.requiresCalibration,
+      calibration_date: a.calibrationDate || null,
+      next_calibration_date: a.nextCalibrationDate || null,
+      notes: a.notes || null, pre_repair_status: a.preRepairStatus || null,
+      transfer_history: a.transferHistory || [],
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (r) => ({
+      id: r.id, tag: r.tag, name: r.name, categoryId: r.category_id, assetType: r.asset_type,
+      brand: r.brand, model: r.model, serial: r.serial, status: r.status, condition: r.condition,
+      locationId: r.location_id, assignedTo: r.assigned_to,
+      purchaseDate: r.purchase_date, purchaseCost: r.purchase_cost, warrantyExpiry: r.warranty_expiry,
+      requiresCalibration: r.requires_calibration, calibrationDate: r.calibration_date,
+      nextCalibrationDate: r.next_calibration_date, notes: r.notes,
+      preRepairStatus: r.pre_repair_status, transferHistory: r.transfer_history || [],
+    }),
+  },
+  maintenance: {
+    table: "maintenance",
+    toRow: (m) => ({
+      id: m.id, asset_id: m.assetId || null, description: m.description || null,
+      cost: m.cost ?? null, date: m.date || null, status: m.status || null,
+    }),
+    fromRow: (r) => ({
+      id: r.id, assetId: r.asset_id, description: r.description, cost: r.cost, date: r.date, status: r.status,
+    }),
+  },
+  auditLog: {
+    table: "audit_log",
+    toRow: (e) => ({ id: e.id, at: e.at, user_id: e.userId || null, user_name: e.userName || null, message: e.message || null }),
+    fromRow: (r) => ({ id: r.id, at: r.at, userId: r.user_id, userName: r.user_name, message: r.message }),
+  },
+};
 
 /**
- * Fetch the single shared org-data record.
- * Returns null if the table is empty (first run) so the caller can seed it.
- * Throws if the request fails (offline, misconfigured, etc.) — callers
- * should catch this and show a connection-error state.
+ * Loads all six tables and assembles them into the same shape the app
+ * has always used. Returns null only if every table is empty (first run).
  */
 export async function fetchOrgData() {
-  const { data, error } = await supabase
-    .from("app_data")
-    .select("payload")
-    .eq("id", ROW_ID)
-    .maybeSingle();
+  const entries = Object.entries(TABLES);
+  const results = await Promise.all(
+    entries.map(([, def]) =>
+      def.table === "audit_log"
+        ? supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(300)
+        : supabase.from(def.table).select("*")
+    )
+  );
 
-  if (error) throw error;
-  if (!data?.payload) return null;
-  // Backward compatibility: older saved data won't have an auditLog yet.
-  return { auditLog: [], ...data.payload };
+  results.forEach((r, i) => {
+    if (r.error) throw r.error;
+  });
+
+  const data = {};
+  entries.forEach(([key, def], i) => {
+    data[key] = (results[i].data || []).map(def.fromRow);
+  });
+
+  const isEmpty = Object.values(data).every((arr) => arr.length === 0);
+  return isEmpty ? null : data;
 }
 
 /**
- * Write the full org-data object back to the shared database row.
- * Uses upsert so the very first save (seeding) works even if the row
- * doesn't exist yet.
+ * Saves org data by diffing `next` against `prev` (the last known state)
+ * per entity, per row — so a single edit only writes the row(s) that
+ * actually changed instead of rewriting everyone's data.
+ *
+ * `prev` should be the data object you last loaded/saved. Pass null/undefined
+ * on first save (e.g. seeding) — everything will be treated as new.
  */
-export async function saveOrgData(payload) {
-  const { error } = await supabase
-    .from("app_data")
-    .upsert({ id: ROW_ID, payload, updated_at: new Date().toISOString() });
+export async function saveOrgData(next, prev) {
+  const before = prev || {};
 
-  if (error) throw error;
+  for (const [key, def] of Object.entries(TABLES)) {
+    const nextList = next[key] || [];
+    const prevList = before[key] || [];
+    const prevById = new Map(prevList.map((r) => [r.id, r]));
+    const nextIds = new Set(nextList.map((r) => r.id));
+
+    const toUpsert = nextList.filter((r) => {
+      const p = prevById.get(r.id);
+      return !p || JSON.stringify(p) !== JSON.stringify(r);
+    });
+    const toDeleteIds = prevList
+      .filter((r) => !nextIds.has(r.id))
+      .map((r) => r.id);
+
+    if (toUpsert.length) {
+      const { error } = await supabase.from(def.table).upsert(toUpsert.map(def.toRow));
+      if (error) throw error;
+    }
+    if (toDeleteIds.length) {
+      const { error } = await supabase.from(def.table).delete().in("id", toDeleteIds);
+      if (error) throw error;
+    }
+  }
 }
 
 /**
- * Subscribes to live changes on the shared data row via Supabase Realtime.
- * Whenever ANY user saves (insert or update), onChange is called with the
- * new payload — no polling, no manual sync button needed. Requires Realtime
- * to be enabled for the app_data table (see supabase-setup.sql).
+ * Subscribes to live changes across all six tables via Supabase Realtime.
+ * On any change from any user, refetches the full data set and calls
+ * onChange with it — no polling, no manual sync button needed.
  *
  * Returns an unsubscribe function — call it on unmount to clean up.
  */
 export function subscribeToOrgData(onChange) {
-  const channel = supabase
-    .channel("app_data_live")
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "app_data", filter: `id=eq.${ROW_ID}` },
-      (payload) => {
-        const next = payload.new?.payload;
-        if (next) onChange({ auditLog: [], ...next });
-      }
-    )
-    .subscribe();
+  let cancelled = false;
+  const refetch = async () => {
+    try {
+      const data = await fetchOrgData();
+      if (!cancelled && data) onChange(data);
+    } catch {
+      // Transient errors on a live-update refetch aren't worth surfacing —
+      // the next successful change event (or manual Sync) will catch up.
+    }
+  };
+
+  const channel = supabase.channel("org_data_live");
+  Object.values(TABLES).forEach((def) => {
+    channel.on("postgres_changes", { event: "*", schema: "public", table: def.table }, refetch);
+  });
+  channel.subscribe();
 
   return () => {
+    cancelled = true;
     supabase.removeChannel(channel);
   };
 }
