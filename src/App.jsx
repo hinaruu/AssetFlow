@@ -3362,16 +3362,16 @@ function GlobalStyles() {
 
       .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); }
       .modal-head h3 { font-size: 15px; }
-      .modal-body { padding: 20px; }
+      .modal-body { padding: 18px; }
       .modal.confirm { max-width: 340px; padding: 22px; text-align: center; }
       .confirm-icon { width: 40px; height: 40px; border-radius: 999px; background: #FEE2E2; color: #DC2626; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; }
       .confirm-actions { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
 
       .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
       .form-full { grid-column: 1 / -1; }
-      .field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-soft); font-weight: 500; }
+      .field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-soft); font-weight: 500; }
       .field input, .field select, .field textarea {
-        border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13.5px;
+        border: 1px solid var(--border); border-radius: 7px; padding: 7px 10px; font-size: 13.5px;
         background: var(--bg); color: var(--text); font-family: inherit;
       }
       .field input:disabled, .field select:disabled, .field textarea:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -3382,33 +3382,36 @@ function GlobalStyles() {
       .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .required-mark { color: var(--danger); margin-left: 2px; }
 
-      /* New Asset form — section cards */
-      .form-section { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
-      .form-section:last-of-type { margin-bottom: 0; }
-      .form-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
-      .form-section-head-icon { width: 26px; height: 26px; border-radius: 7px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-      .form-section-head h4 { font-size: 13px; font-weight: 700; letter-spacing: 0.01em; }
+      /* New Asset form — compact sections separated by hairline dividers
+         (not nested cards), Linear/Notion-style density. Divider is drawn
+         between consecutive sections via the adjacent-sibling combinator,
+         so it never mistakenly lands above the sticky footer. */
+      .form-section { padding: 14px 0; }
+      .form-section + .form-section { border-top: 1px solid var(--border); }
+      .form-section-head { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
+      .form-section-head-icon { width: 15px; height: 15px; color: var(--accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .form-section-head h4 { font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-soft); }
       .form-section-head-action { margin-left: auto; }
-      .section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+      .section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
       .section-grid .form-full { grid-column: 1 / -1; }
 
       /* Toggle switch */
-      .toggle-switch-wrap { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 11.5px; color: var(--text-soft); font-weight: 600; user-select: none; }
-      .toggle-switch { position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; }
+      .toggle-switch-wrap { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; color: var(--text-soft); font-weight: 600; user-select: none; }
+      .toggle-switch { position: relative; display: inline-block; width: 28px; height: 16px; flex-shrink: 0; }
       .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
       .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 999px; transition: background 0.15s ease; }
-      .toggle-slider::before { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: #fff; border-radius: 999px; transition: transform 0.15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+      .toggle-slider::before { content: ""; position: absolute; width: 12px; height: 12px; left: 2px; top: 2px; background: #fff; border-radius: 999px; transition: transform 0.15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
       .toggle-switch input:checked + .toggle-slider { background: var(--accent); }
-      .toggle-switch input:checked + .toggle-slider::before { transform: translateX(14px); }
+      .toggle-switch input:checked + .toggle-slider::before { transform: translateX(12px); }
 
       /* Status picker (colored badge dropdown) */
       .status-picker { position: relative; }
-      .status-picker-trigger { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--bg); cursor: pointer; color: var(--text-soft); font-family: inherit; font-size: 13px; }
+      .status-picker-trigger { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; background: var(--bg); cursor: pointer; color: var(--text-soft); font-family: inherit; font-size: 13px; }
       .status-picker-placeholder { color: var(--text-soft); }
-      .status-dot-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-      .status-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
-      .status-picker-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.16); padding: 6px; z-index: 20; }
-      .status-picker-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border-radius: 7px; border: none; background: none; cursor: pointer; font-family: inherit; font-size: 12.5px; color: var(--text); text-align: left; }
+      .status-dot-badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
+      .status-dot { width: 6px; height: 6px; border-radius: 999px; flex-shrink: 0; }
+      .status-picker-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.16); padding: 4px; z-index: 20; }
+      .status-picker-option { display: flex; align-items: center; gap: 7px; width: 100%; padding: 6px 7px; border-radius: 6px; border: none; background: none; cursor: pointer; font-family: inherit; font-size: 12.5px; color: var(--text); text-align: left; }
       .status-picker-option:hover { background: var(--accent-soft); color: var(--accent); }
 
       /* Searchable select */
@@ -3416,18 +3419,18 @@ function GlobalStyles() {
       .searchable-select input { width: 100%; }
       .searchable-select-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 190px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.16); padding: 4px; z-index: 20; scrollbar-width: none; }
       .searchable-select-menu::-webkit-scrollbar { display: none; }
-      .searchable-select-option { padding: 7px 9px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+      .searchable-select-option { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
       .searchable-select-option:hover { background: var(--accent-soft); color: var(--accent); }
       .searchable-select-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-soft); cursor: pointer; padding: 2px; display: flex; }
 
       /* Repair-reason callout + optional collapsible section */
-      .repair-reason-box { background: color-mix(in srgb, var(--danger) 6%, var(--bg)); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border)); border-radius: 10px; padding: 12px 14px; }
+      .repair-reason-box { background: color-mix(in srgb, var(--danger) 6%, var(--bg)); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border)); border-radius: 9px; padding: 10px 12px; }
       .optional-section-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; cursor: pointer; padding: 0; color: var(--text-soft); font-family: inherit; }
       .optional-section-toggle:hover .form-section-head h4 { color: var(--accent); }
-      .optional-section-body { margin-top: 14px; }
+      .optional-section-body { margin-top: 10px; }
 
       /* Sticky footer for the New/Edit Asset form */
-      .modal-footer-sticky { position: sticky; bottom: 0; margin: 20px -20px -20px; padding: 14px 20px; background: var(--surface); border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; border-radius: 0 0 14px 14px; }
+      .modal-footer-sticky { position: sticky; bottom: 0; margin: 14px -18px -18px; padding: 12px 18px; background: var(--surface); border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; border-radius: 0 0 14px 14px; }
       .sort-th-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; padding: 0; font: inherit; font-weight: inherit; color: inherit; cursor: pointer; }
       .sort-th-idle { opacity: 0.35; }
       .name-subtext { font-size: 11.5px; color: var(--text-soft); font-weight: 400; margin-top: 2px; }
