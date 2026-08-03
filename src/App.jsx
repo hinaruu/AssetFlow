@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
+  KeyRound, ShieldCheck, AlertTriangle,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
@@ -481,7 +481,6 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast, setToast] = useState(null); // { message, phase: 'in' | 'out' }
   const [connectionError, setConnectionError] = useState(null);
-  const [syncing, setSyncing] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
   const [focusAssetId, setFocusAssetId] = useState(null);
   const dataRef = React.useRef(null);
@@ -568,22 +567,6 @@ export default function App() {
     }
   }, [showToast]);
 
-  // Manually pull the latest data from the shared database
-  const syncNow = useCallback(async () => {
-    setSyncing(true);
-    try {
-      const orgData = await loadFromCloud({ seedIfEmpty: false });
-      if (orgData) setData(orgData);
-      setConnectionError(null);
-      setLastSynced(new Date());
-      showToast("Synced with latest data.");
-    } catch (err) {
-      showToast("Sync failed — check your connection.");
-    } finally {
-      setSyncing(false);
-    }
-  }, [loadFromCloud, showToast]);
-
   const toggleTheme = () => {
     const next = theme === "light" ? "dark" : "light";
     setTheme(next);
@@ -668,9 +651,6 @@ export default function App() {
             onToggleSidebar={toggleSidebar}
             locations={data.locations}
             scopedLocationId={scopedLocationId}
-            onSync={syncNow}
-            syncing={syncing}
-            lastSynced={lastSynced}
             data={data}
             persist={persist}
             onOpenAsset={openAssetFromNotif}
@@ -771,15 +751,13 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
 /* ---------------------------------------------------------
    Top Bar
 --------------------------------------------------------- */
-function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, onToggleSidebar, persist, onOpenAsset }) {
+function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, data, onToggleSidebar, persist, onOpenAsset }) {
   const [notifOpen, setNotifOpen] = useState(false);
+  const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
   const isAdmin = currentUser.role === "Admin";
   const locName = scopedLocationId
     ? locations.find((l) => l.id === scopedLocationId)?.name
     : "All Locations (HQ)";
-  const syncedLabel = lastSynced
-    ? `Synced ${lastSynced.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-    : "";
 
   const alerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
@@ -806,6 +784,8 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
     if (onOpenAsset) onOpenAsset(comment.assetId);
   };
 
+  const initials = currentUser.name.split(" ").map((s) => s[0]).slice(0, 2).join("");
+
   return (
     <div className="topbar">
       <div className="topbar-left">
@@ -815,10 +795,6 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
         <span className="topbar-region"><MapPin size={13} /> {locName}</span>
       </div>
       <div className="topbar-right">
-        {syncedLabel && <span className="user-role synced-label" style={{ marginRight: 2 }}>{syncedLabel}</span>}
-        <button className="icon-btn" onClick={onSync} title="Force refresh (data syncs live automatically)" disabled={syncing}>
-          <RefreshCw size={16} className={syncing ? "spin" : ""} />
-        </button>
         <div className="notif-wrap">
           <button className="icon-btn" onClick={() => setNotifOpen((o) => !o)} title="Notifications">
             <Bell size={16} />
@@ -829,12 +805,12 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
               <div className="notif-backdrop" onClick={() => setNotifOpen(false)} />
               <div className="notif-panel">
                 <div className="notif-section-title">Needs Attention</div>
-                {alerts.length === 0 && <div className="notif-empty">Nothing expiring in the next 30 days.</div>}
+                {alerts.length === 0 && myComments.length === 0 && (
+                  <div className="notif-empty">You're all caught up.</div>
+                )}
                 {alerts.slice(0, 8).map((a) => (
                   <div key={a.id} className={`notif-item ${a.urgent ? "urgent" : ""}`}>{a.label}</div>
                 ))}
-                <div className="notif-section-title" style={{ marginTop: 10 }}>Comments</div>
-                {myComments.length === 0 && <div className="notif-empty">No new comments.</div>}
                 {myComments.map((c) => {
                   const asset = data.assets.find((a) => a.id === c.assetId);
                   // If I already have an earlier comment in this same thread,
@@ -873,14 +849,21 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
           {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
         </button>
         <div className="user-chip">
-          <div className="avatar">{currentUser.name.split(" ").map((s) => s[0]).slice(0, 2).join("")}</div>
+          <div className="avatar">{initials}</div>
           <div className="user-meta">
             <div className="user-name">{currentUser.name}</div>
             <div className="user-role">{currentUser.position || currentUser.role}</div>
           </div>
         </div>
-        <button className="icon-btn" onClick={onLogout} title="Log out"><LogOut size={16} /></button>
+        <button className="icon-btn" onClick={() => setConfirmLogoutOpen(true)} title="Log out"><LogOut size={16} /></button>
       </div>
+      {confirmLogoutOpen && (
+        <ConfirmDialog
+          message="Sign out of Asset Manager?"
+          onCancel={() => setConfirmLogoutOpen(false)}
+          onConfirm={() => { setConfirmLogoutOpen(false); onLogout(); }}
+        />
+      )}
     </div>
   );
 }
@@ -1598,9 +1581,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                 const loc = data.locations.find((l) => l.id === a.locationId);
                 const brandModel = [a.brand, a.model].filter(Boolean).join(" / ");
                 return (
-                  <tr key={a.id}>
+                  <tr key={a.id} className="asset-row" onClick={() => setViewing(a)}>
                     {isAdmin && (
-                      <td className="checkbox-cell">
+                      <td className="checkbox-cell" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={selected.includes(a.id)}
@@ -1615,7 +1598,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                       {cat?.name || "—"}
                     </td>
                     <td data-label="Asset Tag">
-                      <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
+                      <span className="link-tag" title="View details — edit, duplicate, transfer, delete">{a.tag}</span>
                       {unreadCommentAssetIds.has(a.id) && (
                         <MessageCircle size={13} className="comment-flag" title="New comment on this asset" />
                       )}
@@ -1769,6 +1752,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
 function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, departmentOptions, onClose, onSave }) {
   const [form, setForm] = useState(asset);
   const [hasPurchaseInfo, setHasPurchaseInfo] = useState(!!(asset.purchaseDate || asset.purchaseCost));
+  const [hasWarrantyExpiry, setHasWarrantyExpiry] = useState(!!(asset.warrantyExpiry && asset.warrantyExpiry !== "N/A"));
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
   const wasUnderRepair = asset.status === "Under Repair";
@@ -1817,6 +1801,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
       ...form,
       purchaseDate: hasPurchaseInfo ? form.purchaseDate : "",
       purchaseCost: hasPurchaseInfo ? form.purchaseCost : "",
+      warrantyExpiry: form.assetType === "IT" ? (hasWarrantyExpiry ? form.warrantyExpiry : "N/A") : form.warrantyExpiry,
     });
   };
 
@@ -1940,7 +1925,24 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
           </>
         )}
         {form.assetType === "IT" ? (
-          <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
+          <>
+            <Field label="Add Warranty Expiry?">
+              <select
+                value={hasWarrantyExpiry ? "yes" : "no"}
+                onChange={(e) => {
+                  const yes = e.target.value === "yes";
+                  setHasWarrantyExpiry(yes);
+                  if (yes && (!form.warrantyExpiry || form.warrantyExpiry === "N/A")) set("warrantyExpiry", todayISO());
+                }}
+              >
+                <option value="no">No / N.A</option>
+                <option value="yes">Yes</option>
+              </select>
+            </Field>
+            {hasWarrantyExpiry && (
+              <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
+            )}
+          </>
         ) : (
           <Field label="Requires Calibration?">
             <select
@@ -3028,8 +3030,9 @@ function GlobalStyles() {
       .topbar-region { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-soft); background: var(--bg); padding: 6px 12px; border-radius: 999px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .topbar-right { display: flex; align-items: center; gap: 10px; }
       .mobile-menu-btn { display: flex; flex-shrink: 0; }
-      .user-chip { display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); }
-      .avatar { width: 28px; height: 28px; border-radius: 999px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+      .user-chip { display: flex; align-items: center; gap: 9px; padding: 4px 14px 4px 4px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 1px 2px rgba(0,0,0,0.04); transition: box-shadow 0.15s ease, border-color 0.15s ease; }
+      .user-chip:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+      .avatar { width: 32px; height: 32px; border-radius: 999px; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #7C3AED)); color: white; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; letter-spacing: 0.3px; flex-shrink: 0; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px color-mix(in srgb, var(--accent) 45%, transparent); }
       .user-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; }
       .user-role { font-size: 11px; color: var(--text-soft); }
       .sidebar-backdrop { display: none; }
@@ -3109,6 +3112,8 @@ function GlobalStyles() {
       .mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
       .cat-dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 7px; vertical-align: middle; }
       tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+      .asset-row { cursor: pointer; }
+      .asset-row .checkbox-cell { cursor: default; }
       .empty-cell { text-align: center; color: var(--text-soft); padding: 28px !important; white-space: normal; }
 
       .badge { padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; display: inline-block; }
