@@ -7,6 +7,7 @@ import {
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
+import * as XLSX from "xlsx";
 import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
 
 /* ---------------------------------------------------------
@@ -103,6 +104,63 @@ function computeAlerts(assets, scopedLocationId) {
   return alerts.sort((a, b) => (b.urgent === a.urgent ? 0 : b.urgent ? 1 : -1));
 }
 
+
+// Triggers a browser download for a built XLSX workbook.
+function downloadWorkbook(workbook, filename) {
+  const wbout = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([wbout], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Reads a File as an XLSX workbook (async).
+function readWorkbookFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const wb = XLSX.read(reader.result, { type: "array" });
+        resolve(wb);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(new Error("Could not read file."));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// Reads every row of a sheet as an array of plain objects (empty cells -> "").
+function sheetRows(workbook, sheetName) {
+  const sheet = workbook.Sheets[sheetName];
+  if (!sheet) return [];
+  return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+}
+
+// Serializes a JS value that might be an array/object into a JSON string for
+// a spreadsheet cell (used for the handful of nested fields like transfer
+// history), leaving plain scalars untouched.
+function cellify(value) {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value) || typeof value === "object") return JSON.stringify(value);
+  return value;
+}
+
+// Reverses cellify() — parses a cell back into an array/object if it looks
+// like JSON, otherwise returns it as-is (or a fallback default).
+function parseCell(value, fallback) {
+  if (value === "" || value === null || value === undefined) return fallback;
+  if (typeof value === "string" && (value.startsWith("[") || value.startsWith("{"))) {
+    try { return JSON.parse(value); } catch { return fallback; }
+  }
+  return value;
+}
 
 const CONDITION_OPTIONS = ["New", "Good", "Fair", "Poor"];
 const MAINT_STATUS = ["Not Started", "In Progress", "Done"];
@@ -791,6 +849,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
    Dashboard
 --------------------------------------------------------- */
 function Dashboard({ data, scopedLocationId, currentUser }) {
+  const isAdmin = currentUser?.role === "Admin";
   const assets = scopedLocationId
     ? data.assets.filter((a) => a.locationId === scopedLocationId)
     : data.assets;
@@ -811,6 +870,20 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
     return Object.entries(counts).map(([name, value]) => ({ name, value }));
   }, [assets, data.categories]);
 
+  // Admin-only: how assets break down across every location/country. Not
+  // scoped by scopedLocationId (that's always null for an admin anyway),
+  // so this always reflects the whole company.
+  const locationData = useMemo(() => {
+    if (!isAdmin) return [];
+    const counts = {};
+    data.assets.forEach((a) => {
+      const loc = data.locations.find((l) => l.id === a.locationId);
+      const name = loc ? loc.name : "Unassigned";
+      counts[name] = (counts[name] || 0) + 1;
+    });
+    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+  }, [isAdmin, data.assets, data.locations]);
+
   // Same index-based assignment as categoryColor() so the pie chart and the
   // category dots shown in the tables always agree on a category's color.
   const categoryPalette = useMemo(() => {
@@ -818,6 +891,12 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
     data.categories.forEach((c, i) => { map[c.name] = CAT_PALETTE[i % CAT_PALETTE.length]; });
     return map;
   }, [data.categories]);
+
+  const locationPalette = useMemo(() => {
+    const map = {};
+    data.locations.forEach((l, i) => { map[l.name] = CAT_PALETTE[(i + 3) % CAT_PALETTE.length]; });
+    return map;
+  }, [data.locations]);
 
   const totals = {
     total: assets.length,
@@ -849,9 +928,12 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
         <Metric label="Under Repair" value={totals.underRepair} icon={Wrench} color={STATUS_COLORS["Under Repair"]} />
       </div>
 
-      <div className="charts-row">
-        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} />
-        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} />
+      <div className={`charts-row ${isAdmin ? "charts-row-3" : ""}`}>
+        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} compact={isAdmin} />
+        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} compact={isAdmin} />
+        {isAdmin && (
+          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} compact />
+        )}
       </div>
 
       <div className="panel">
@@ -911,7 +993,7 @@ function Metric({ label, value, icon: Icon, color }) {
   );
 }
 
-function DonutCard({ title, data, palette }) {
+function DonutCard({ title, data, palette, compact }) {
   const colors = (name, i) => (palette && palette[name]) || CAT_PALETTE[i % CAT_PALETTE.length];
   return (
     <div className="panel chart-card">
@@ -919,9 +1001,9 @@ function DonutCard({ title, data, palette }) {
       {data.length === 0 ? (
         <div className="empty-chart">No data to display</div>
       ) : (
-        <ResponsiveContainer width="100%" height={190}>
+        <ResponsiveContainer width="100%" height={compact ? 168 : 190}>
           <PieChart>
-            <Pie data={data} dataKey="value" nameKey="name" innerRadius={44} outerRadius={66} paddingAngle={2}>
+            <Pie data={data} dataKey="value" nameKey="name" innerRadius={compact ? 36 : 44} outerRadius={compact ? 54 : 66} paddingAngle={2}>
               {data.map((entry, i) => (
                 <Cell key={entry.name} fill={colors(entry.name, i)} />
               ))}
@@ -932,8 +1014,8 @@ function DonutCard({ title, data, palette }) {
               labelStyle={{ fontSize: 12 }}
             />
             <Legend
-              wrapperStyle={{ fontSize: 11, lineHeight: "16px" }}
-              iconSize={8}
+              wrapperStyle={{ fontSize: compact ? 10 : 11, lineHeight: "15px" }}
+              iconSize={7}
               iconType="circle"
             />
           </PieChart>
@@ -1008,8 +1090,6 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [requestDeleteTarget, setRequestDeleteTarget] = useState(null); // asset id awaiting a reason
   const [deleteReason, setDeleteReason] = useState("");
   const [selected, setSelected] = useState([]);
-  const [exportOpen, setExportOpen] = useState(false);
-  const [exportText, setExportText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
   const [transferNewLocationName, setTransferNewLocationName] = useState("");
@@ -1018,21 +1098,54 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [sort, setSort] = useState({ key: null, dir: "asc" });
   const fileInputRef = React.useRef(null);
 
+  // The base pool of assets this user can see at all — a Regional Staff
+  // account only ever sees their own location's assets.
+  const scopedAssetsBase = useMemo(
+    () => (scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets),
+    [data.assets, scopedLocationId]
+  );
+
   // Regional Staff should only see assigned-user names from their own
   // location's assets, not the whole company's.
   const assignedUserOptions = useMemo(() => {
-    const scoped = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
-    const set = new Set(scoped.map((a) => a.assignedTo).filter(Boolean));
+    const set = new Set(scopedAssetsBase.map((a) => a.assignedTo).filter(Boolean));
     return Array.from(set).sort();
-  }, [data.assets, scopedLocationId]);
+  }, [scopedAssetsBase]);
 
   const departmentOptions = useMemo(() => {
     const set = new Set(data.assets.map((a) => a.department).filter(Boolean));
     return Array.from(set).sort();
   }, [data.assets]);
 
+  // The Location filter should only list locations that actually have an
+  // asset somewhere in this user's scope — e.g. an admin shouldn't see an
+  // empty "Philippines" location in the dropdown if nothing's there yet.
+  const locationOptions = useMemo(() => {
+    const ids = new Set(scopedAssetsBase.map((a) => a.locationId));
+    return data.locations.filter((l) => ids.has(l.id)).sort((a, b) => a.name.localeCompare(b.name));
+  }, [data.locations, scopedAssetsBase]);
+
+  // The Category filter should only list categories that have an asset in
+  // the currently selected location (or across the whole scope if no
+  // location is picked) — e.g. don't show "Printers" for a country that
+  // doesn't have one, unless someone's actually added one there.
+  const categoryOptions = useMemo(() => {
+    const base = locationFilter !== "all" ? scopedAssetsBase.filter((a) => a.locationId === locationFilter) : scopedAssetsBase;
+    const ids = new Set(base.map((a) => a.categoryId));
+    return data.categories.filter((c) => ids.has(c.id)).sort((a, b) => a.name.localeCompare(b.name));
+  }, [data.categories, scopedAssetsBase, locationFilter]);
+
+  // If switching the Location filter makes the currently-picked Category no
+  // longer relevant (e.g. that country has no printers), fall back to "all"
+  // instead of silently showing an empty table.
+  useEffect(() => {
+    if (categoryFilter !== "all" && !categoryOptions.some((c) => c.id === categoryFilter)) {
+      setCategoryFilter("all");
+    }
+  }, [categoryOptions, categoryFilter]);
+
   const visibleAssets = useMemo(() => {
-    let list = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
+    let list = scopedAssetsBase;
     if (locationFilter !== "all") list = list.filter((a) => a.locationId === locationFilter);
     if (categoryFilter !== "all") list = list.filter((a) => a.categoryId === categoryFilter);
     if (userFilter !== "all") list = list.filter((a) => a.assignedTo === userFilter);
@@ -1049,7 +1162,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       });
     }
     return list;
-  }, [data.assets, data.locations, data.categories, scopedLocationId, search, locationFilter, categoryFilter, userFilter]);
+  }, [scopedAssetsBase, data.locations, data.categories, search, locationFilter, categoryFilter, userFilter]);
 
   const sortedAssets = useMemo(() => {
     if (!sort.key) return visibleAssets;
@@ -1280,111 +1393,70 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
 
   const EXPORT_COLS = ["tag", "name", "department", "assetType", "brand", "model", "yearModel", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
 
-  const buildCSV = () => {
+  const exportExcel = () => {
     const rows = visibleAssets.map((a) => {
       const loc = data.locations.find((l) => l.id === a.locationId)?.name || "";
-      return [a.tag, a.name, a.department, a.assetType, a.brand, a.model, a.yearModel, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.requiresCalibration ? "Yes" : "No", a.calibrationDate, a.nextCalibrationDate];
+      return {
+        tag: a.tag, name: a.name, department: a.department || "", assetType: a.assetType,
+        brand: a.brand || "", model: a.model || "", yearModel: a.yearModel || "", serial: a.serial || "",
+        status: a.status, condition: a.condition, location: loc, assignedTo: a.assignedTo || "",
+        purchaseDate: a.purchaseDate || "", purchaseCost: a.purchaseCost || "", warrantyExpiry: a.warrantyExpiry || "",
+        requiresCalibration: a.requiresCalibration ? "Yes" : "No",
+        calibrationDate: a.calibrationDate || "", nextCalibrationDate: a.nextCalibrationDate || "",
+      };
     });
-    return [EXPORT_COLS.join(","), ...rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-  };
-
-  const exportCSV = () => {
-    const csv = buildCSV();
-    // Best-effort automatic download — some environments (sandboxed previews)
-    // block this silently, so we always also show a copyable fallback below.
-    try {
-      const blob = new Blob([csv], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = "assets-export.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch {
-      // ignore — fallback modal below covers this
-    }
-    setExportText(csv);
-    setExportOpen(true);
-  };
-
-  const copyExport = async () => {
-    try {
-      await navigator.clipboard.writeText(exportText);
-      showToast("Copied to clipboard.");
-    } catch {
-      showToast("Select the text below and copy manually.");
-    }
+    const wb = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet(rows, { header: EXPORT_COLS });
+    XLSX.utils.book_append_sheet(wb, sheet, "Assets");
+    downloadWorkbook(wb, "assets-export.xlsx");
+    showToast("Assets exported.");
   };
 
   const triggerImport = () => fileInputRef.current?.click();
 
-  const handleImportFile = (e) => {
+  const handleImportFile = async (e) => {
     const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const text = String(reader.result || "");
-        const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-        if (lines.length < 2) { showToast("CSV file has no data rows."); return; }
-        const parseLine = (line) => {
-          const out = [];
-          let cur = "", inQuotes = false;
-          for (let i = 0; i < line.length; i++) {
-            const ch = line[i];
-            if (ch === '"') {
-              if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
-              else inQuotes = !inQuotes;
-            } else if (ch === "," && !inQuotes) {
-              out.push(cur); cur = "";
-            } else cur += ch;
-          }
-          out.push(cur);
-          return out;
-        };
-        const header = parseLine(lines[0]).map((h) => h.trim());
-        const newAssets = [];
-        for (let i = 1; i < lines.length; i++) {
-          const cells = parseLine(lines[i]);
-          const row = {};
-          header.forEach((h, idx) => { row[h] = cells[idx] ?? ""; });
-          const loc = data.locations.find((l) => l.name.toLowerCase() === (row.location || "").toLowerCase());
-          const cat = data.categories.find((c) => c.name.toLowerCase() === (row.name || "").toLowerCase()) ||
-            data.categories.find((c) => (row.assetType || "IT") === c.type);
-          newAssets.push({
-            id: uid("ast"),
-            tag: row.tag || `AST-IMP-${String(i).padStart(3, "0")}`,
-            name: row.name || "Imported Asset",
-            department: row.department || "",
-            categoryId: cat?.id || data.categories[0]?.id || "",
-            assetType: row.assetType === "Non-IT" ? "Non-IT" : "IT",
-            brand: row.brand || "",
-            model: row.model || "",
-            yearModel: row.yearModel || "",
-            serial: row.serial || "",
-            status: STATUS_OPTIONS.includes(row.status) ? row.status : "In Stock",
-            condition: CONDITION_OPTIONS.includes(row.condition) ? row.condition : "Good",
-            locationId: loc?.id || scopedLocationId || data.locations[0]?.id || "",
-            assignedTo: row.assignedTo || "",
-            purchaseDate: row.purchaseDate || todayISO(),
-            purchaseCost: Number(row.purchaseCost) || 0,
-            warrantyExpiry: row.warrantyExpiry || "",
-            requiresCalibration: (row.requiresCalibration || "").toLowerCase() === "yes",
-            calibrationDate: row.calibrationDate || "",
-            nextCalibrationDate: row.nextCalibrationDate || "",
-            notes: "",
-            transferHistory: [],
-          });
-        }
-        persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via CSV`));
-        showToast(`Imported ${newAssets.length} asset(s).`);
-      } catch {
-        showToast("Could not parse this CSV file.");
-      }
-    };
-    reader.readAsText(file);
     e.target.value = "";
+    if (!file) return;
+    try {
+      const wb = await readWorkbookFile(file);
+      const sheetName = wb.SheetNames.includes("Assets") ? "Assets" : wb.SheetNames[0];
+      const rows = sheetRows(wb, sheetName);
+      if (rows.length === 0) { showToast("Excel file has no data rows."); return; }
+      const newAssets = rows.map((row, i) => {
+        const loc = data.locations.find((l) => l.name.toLowerCase() === String(row.location || "").toLowerCase());
+        const cat = data.categories.find((c) => c.name.toLowerCase() === String(row.name || "").toLowerCase()) ||
+          data.categories.find((c) => (row.assetType || "IT") === c.type);
+        return {
+          id: uid("ast"),
+          tag: row.tag || `AST-IMP-${String(i + 1).padStart(3, "0")}`,
+          name: row.name || "Imported Asset",
+          department: row.department || "",
+          categoryId: cat?.id || data.categories[0]?.id || "",
+          assetType: row.assetType === "Non-IT" ? "Non-IT" : "IT",
+          brand: row.brand || "",
+          model: row.model || "",
+          yearModel: row.yearModel || "",
+          serial: row.serial || "",
+          status: STATUS_OPTIONS.includes(row.status) ? row.status : "In Stock",
+          condition: CONDITION_OPTIONS.includes(row.condition) ? row.condition : "Good",
+          locationId: loc?.id || scopedLocationId || data.locations[0]?.id || "",
+          assignedTo: row.assignedTo || "",
+          purchaseDate: row.purchaseDate || todayISO(),
+          purchaseCost: Number(row.purchaseCost) || 0,
+          warrantyExpiry: row.warrantyExpiry || "",
+          requiresCalibration: String(row.requiresCalibration || "").toLowerCase() === "yes",
+          calibrationDate: row.calibrationDate || "",
+          nextCalibrationDate: row.nextCalibrationDate || "",
+          notes: "",
+          transferHistory: [],
+        };
+      });
+      persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via Excel`));
+      showToast(`Imported ${newAssets.length} asset(s).`);
+    } catch {
+      showToast("Could not parse this Excel file.");
+    }
   };
 
   return (
@@ -1397,11 +1469,11 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         <div className="filter-group">
           <select className="sort-select" value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
             <option value="all">All Locations</option>
-            {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            {locationOptions.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
           <select className="sort-select" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
             <option value="all">All Categories</option>
-            {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {categoryOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
           <select className="sort-select" value={userFilter} onChange={(e) => setUserFilter(e.target.value)}>
             <option value="all">All Users</option>
@@ -1416,9 +1488,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           )}
           {isAdmin && (
             <>
-              <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleImportFile} />
-              <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import CSV</button>
-              <button className="btn ghost" onClick={exportCSV}><Download size={14} /> Export CSV</button>
+              <input ref={fileInputRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleImportFile} />
+              <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import Excel</button>
+              <button className="btn ghost" onClick={exportExcel}><Download size={14} /> Export Excel</button>
             </>
           )}
           <button className="btn primary new-asset-btn" onClick={() => setEditing(emptyAsset(scopedLocationId))}>
@@ -1540,18 +1612,6 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
               <button type="button" className="btn ghost" onClick={() => { setRequestDeleteTarget(null); setDeleteReason(""); }}>Cancel</button>
               <button type="button" className="btn danger" onClick={submitDeleteRequest}>Submit Request</button>
             </div>
-          </div>
-        </Modal>
-      )}
-      {exportOpen && (
-        <Modal title="Export Assets (CSV)" onClose={() => setExportOpen(false)} width={640}>
-          <p className="export-hint">
-            A download was attempted automatically. If nothing downloaded, copy the CSV text below and paste it into a spreadsheet or a new text file.
-          </p>
-          <textarea className="export-textarea" readOnly value={exportText} onFocus={(e) => e.target.select()} rows={12} />
-          <div className="modal-actions">
-            <button type="button" className="btn ghost" onClick={() => setExportOpen(false)}>Close</button>
-            <button type="button" className="btn primary" onClick={copyExport}>Copy to Clipboard</button>
           </div>
         </Modal>
       )}
@@ -1841,7 +1901,11 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const [commentText, setCommentText] = useState("");
-  const sortedComments = [...(comments || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+  // Chronological order, oldest first, like a chat thread. Whoever started
+  // the conversation on this asset anchors to the left; anyone else who
+  // replies shows up on the right — a simple two-side chat layout.
+  const chronComments = [...(comments || [])].sort((a, b) => new Date(a.at) - new Date(b.at));
+  const firstAuthorId = chronComments[0]?.authorId;
   const submitComment = () => {
     if (!commentText.trim()) return;
     onAddComment(commentText);
@@ -1890,26 +1954,31 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
 
       <div className="detail-full comments-section">
         <div className="notif-section-title" style={{ marginTop: 14 }}>Comments</div>
-        <div className="comment-list">
-          {sortedComments.length === 0 && (
+        <div className="comment-list chat-list">
+          {chronComments.length === 0 && (
             <div className="notif-empty">No comments yet — use this to clarify something with the assigned user.</div>
           )}
-          {sortedComments.map((c) => (
-            <div key={c.id} className="comment-item">
-              <div className="comment-meta">
-                <span className="comment-author">{c.authorName}</span>
-                <span className="comment-time">{new Date(c.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+          {chronComments.map((c) => {
+            const side = c.authorId === firstAuthorId ? "left" : "right";
+            return (
+              <div key={c.id} className={`chat-row chat-row-${side}`}>
+                <div className={`chat-bubble chat-bubble-${side}`}>
+                  <div className="comment-meta">
+                    <span className="comment-author">{c.authorName}</span>
+                    <span className="comment-time">{new Date(c.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+                  </div>
+                  <div className="comment-text">{c.message}</div>
+                </div>
               </div>
-              <div className="comment-text">{c.message}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <div className="comment-composer">
           <textarea
             value={commentText}
             onChange={(e) => setCommentText(e.target.value)}
             rows={2}
-            placeholder={asset.createdByName ? `Message ${asset.createdByName} (added this asset) about this…` : "Add a comment…"}
+            placeholder="Add a comment…"
           />
           <button type="button" className="btn primary" onClick={submitComment} disabled={!commentText.trim()}>
             Send
@@ -2434,11 +2503,108 @@ function UsersView({ data, persist, showToast, currentUser }) {
 }
 
 /* ---------------------------------------------------------
+   Backup & Restore — full-data Excel workbook (one sheet per table)
+--------------------------------------------------------- */
+function buildBackupWorkbook(data) {
+  const wb = XLSX.utils.book_new();
+
+  const addSheet = (name, rows) => {
+    const sheet = rows.length ? XLSX.utils.json_to_sheet(rows) : XLSX.utils.aoa_to_sheet([[]]);
+    XLSX.utils.book_append_sheet(wb, sheet, name);
+  };
+
+  addSheet("Locations", (data.locations || []).map((l) => ({ id: l.id, name: l.name })));
+
+  addSheet("Categories", (data.categories || []).map((c) => ({
+    id: c.id, name: c.name, type: c.type, usefulLife: c.usefulLife,
+  })));
+
+  addSheet("Assets", (data.assets || []).map((a) => ({
+    id: a.id, tag: a.tag, name: a.name, department: a.department, categoryId: a.categoryId,
+    assetType: a.assetType, brand: a.brand, model: a.model, yearModel: a.yearModel, serial: a.serial,
+    status: a.status, condition: a.condition, locationId: a.locationId, assignedTo: a.assignedTo,
+    createdById: a.createdById, createdByName: a.createdByName,
+    purchaseDate: a.purchaseDate, purchaseCost: a.purchaseCost, warrantyExpiry: a.warrantyExpiry,
+    requiresCalibration: a.requiresCalibration ? "Yes" : "No",
+    calibrationDate: a.calibrationDate, nextCalibrationDate: a.nextCalibrationDate,
+    preRepairStatus: a.preRepairStatus || "", notes: a.notes,
+    transferHistory: cellify(a.transferHistory || []),
+    pendingDeletion: cellify(a.pendingDeletion || null),
+  })));
+
+  addSheet("Maintenance", (data.maintenance || []).map((m) => ({
+    id: m.id, assetId: m.assetId, description: m.description, cost: m.cost, date: m.date, status: m.status,
+  })));
+
+  addSheet("Users", (data.users || []).map((u) => ({
+    id: u.id, name: u.name, username: u.username, email: u.email, position: u.position,
+    passwordHash: u.passwordHash, role: u.role, locationId: u.locationId || "",
+  })));
+
+  addSheet("Comments", (data.comments || []).map((c) => ({
+    id: c.id, assetId: c.assetId, authorId: c.authorId, authorName: c.authorName,
+    message: c.message, at: c.at,
+    targetUserIds: cellify(c.targetUserIds || []), readBy: cellify(c.readBy || []),
+  })));
+
+  addSheet("AuditLog", (data.auditLog || []).map((l) => ({
+    id: l.id, at: l.at, userId: l.userId, userName: l.userName, message: l.message,
+  })));
+
+  return wb;
+}
+
+function parseBackupWorkbook(wb) {
+  const locations = sheetRows(wb, "Locations").map((r) => ({ id: String(r.id), name: r.name }));
+
+  const categories = sheetRows(wb, "Categories").map((r) => ({
+    id: String(r.id), name: r.name, type: r.type, usefulLife: Number(r.usefulLife) || 0,
+  }));
+
+  const assets = sheetRows(wb, "Assets").map((r) => ({
+    id: String(r.id), tag: r.tag, name: r.name, department: r.department || "",
+    categoryId: String(r.categoryId || ""), assetType: r.assetType, brand: r.brand, model: r.model,
+    yearModel: r.yearModel, serial: r.serial, status: r.status, condition: r.condition,
+    locationId: String(r.locationId || ""), assignedTo: r.assignedTo,
+    createdById: r.createdById ? String(r.createdById) : null, createdByName: r.createdByName || "",
+    purchaseDate: r.purchaseDate, purchaseCost: Number(r.purchaseCost) || 0, warrantyExpiry: r.warrantyExpiry,
+    requiresCalibration: String(r.requiresCalibration).toLowerCase() === "yes",
+    calibrationDate: r.calibrationDate, nextCalibrationDate: r.nextCalibrationDate,
+    preRepairStatus: r.preRepairStatus || null, notes: r.notes,
+    transferHistory: parseCell(r.transferHistory, []),
+    pendingDeletion: parseCell(r.pendingDeletion, null),
+  }));
+
+  const maintenance = sheetRows(wb, "Maintenance").map((r) => ({
+    id: String(r.id), assetId: String(r.assetId), description: r.description,
+    cost: Number(r.cost) || 0, date: r.date, status: r.status,
+  }));
+
+  const users = sheetRows(wb, "Users").map((r) => ({
+    id: String(r.id), name: r.name, username: r.username, email: r.email, position: r.position,
+    passwordHash: r.passwordHash, role: r.role, locationId: r.locationId ? String(r.locationId) : null,
+  }));
+
+  const comments = sheetRows(wb, "Comments").map((r) => ({
+    id: String(r.id), assetId: String(r.assetId), authorId: String(r.authorId || ""),
+    authorName: r.authorName, message: r.message, at: r.at,
+    targetUserIds: parseCell(r.targetUserIds, []), readBy: parseCell(r.readBy, []),
+  }));
+
+  const auditLog = sheetRows(wb, "AuditLog").map((r) => ({
+    id: String(r.id), at: r.at, userId: r.userId ? String(r.userId) : null,
+    userName: r.userName, message: r.message,
+  }));
+
+  return { locations, categories, assets, maintenance, users, comments, auditLog };
+}
+
+/* ---------------------------------------------------------
    Backup & Restore
 --------------------------------------------------------- */
 function BackupView({ data, persist, showToast, currentUser }) {
   const inputRef = React.useRef(null);
-  const [pendingRestore, setPendingRestore] = useState(null); // parsed JSON awaiting confirm
+  const [pendingRestore, setPendingRestore] = useState(null); // parsed backup awaiting confirm
   const [restoreError, setRestoreError] = useState("");
 
   const orphanCount = useMemo(() => {
@@ -2459,39 +2625,30 @@ function BackupView({ data, persist, showToast, currentUser }) {
   };
 
   const downloadBackup = () => {
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
+    const wb = buildBackupWorkbook(data);
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    a.href = url;
-    a.download = `asset-manager-backup-${stamp}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadWorkbook(wb, `asset-manager-backup-${stamp}.xlsx`);
     showToast("Backup downloaded.");
   };
 
   const triggerRestore = () => inputRef.current?.click();
 
-  const handleFile = (e) => {
+  const handleFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
     setRestoreError("");
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result));
-        if (!parsed || !Array.isArray(parsed.assets) || !Array.isArray(parsed.locations)) {
-          setRestoreError("This doesn't look like a valid backup file.");
-          return;
-        }
-        setPendingRestore({ auditLog: [], ...parsed });
-      } catch {
-        setRestoreError("Couldn't read that file — make sure it's a backup .json file.");
+    try {
+      const wb = await readWorkbookFile(file);
+      const parsed = parseBackupWorkbook(wb);
+      if (!Array.isArray(parsed.assets) || !Array.isArray(parsed.locations) || parsed.locations.length === 0) {
+        setRestoreError("This doesn't look like a valid backup file.");
+        return;
       }
-    };
-    reader.readAsText(file);
+      setPendingRestore(parsed);
+    } catch {
+      setRestoreError("Couldn't read that file — make sure it's a backup .xlsx file.");
+    }
   };
 
   const confirmRestore = async () => {
@@ -2533,7 +2690,7 @@ function BackupView({ data, persist, showToast, currentUser }) {
             backups, so it's worth doing this occasionally.
           </p>
           <button className="btn primary" onClick={downloadBackup}>
-            <Download size={14} /> Download Backup (.json)
+            <Download size={14} /> Download Backup (.xlsx)
           </button>
         </div>
       </div>
@@ -2546,7 +2703,7 @@ function BackupView({ data, persist, showToast, currentUser }) {
             what's in the file you choose. Use this to undo a mistake or recover from
             a lost project.
           </p>
-          <input ref={inputRef} type="file" accept=".json" style={{ display: "none" }} onChange={handleFile} />
+          <input ref={inputRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleFile} />
           <button className="btn ghost" onClick={triggerRestore}>
             <Upload size={14} /> Choose Backup File
           </button>
@@ -2808,7 +2965,7 @@ function GlobalStyles() {
       .notif-item:last-child { border-bottom: none; }
       .notif-item.urgent { color: var(--danger); font-weight: 600; }
       .notif-empty { font-size: 12.5px; color: var(--text-soft); padding: 4px 0 8px; }
-      .notif-item-btn { display: block; width: 100%; text-align: left; background: none; border: none; font: inherit; color: inherit; cursor: pointer; padding: 6px 0; }
+      .notif-item-btn { display: block; width: 100%; text-align: left; background: none; border: none; font-family: inherit; font-size: 12.5px; line-height: 1.4; color: inherit; cursor: pointer; padding: 6px 0; }
       .notif-item-btn:hover { color: var(--accent); }
 
       .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
@@ -2822,9 +2979,15 @@ function GlobalStyles() {
       .notes-highlight { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
 
       .comments-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-      .comment-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; margin-bottom: 10px; }
-      .comment-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
-      .comment-meta { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-soft); margin-bottom: 4px; }
+      .comment-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; padding: 4px 2px; }
+      .chat-row { display: flex; }
+      .chat-row-left { justify-content: flex-start; }
+      .chat-row-right { justify-content: flex-end; }
+      .chat-bubble { max-width: 78%; border-radius: 14px; padding: 8px 12px; }
+      .chat-bubble-left { background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+      .chat-bubble-right { background: var(--accent); color: white; border-bottom-right-radius: 4px; }
+      .comment-meta { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; margin-bottom: 4px; color: var(--text-soft); }
+      .chat-bubble-right .comment-meta { color: rgba(255,255,255,0.8); }
       .comment-author { font-weight: 700; }
       .comment-text { font-size: 13px; line-height: 1.4; white-space: pre-wrap; }
       .comment-composer { display: flex; gap: 8px; align-items: flex-end; }
@@ -2845,7 +3008,9 @@ function GlobalStyles() {
       .metric-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
 
       .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+      .charts-row-3 { grid-template-columns: repeat(3, 1fr); }
       .chart-card { min-height: 230px; }
+      .charts-row-3 .chart-card { min-height: 210px; padding-bottom: 4px; }
       .empty-chart { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--text-soft); font-size: 13px; }
 
       .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
@@ -2931,6 +3096,9 @@ function GlobalStyles() {
       @keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
       @keyframes modalIn { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 
+      @media (max-width: 1100px) {
+        .charts-row-3 { grid-template-columns: 1fr 1fr; }
+      }
       @media (max-width: 860px) {
         .sidebar { position: fixed; z-index: 70; height: 100vh; height: 100dvh; top: 0; left: 0; width: 240px; transform: translateX(-100%); box-shadow: 0 0 0 rgba(0,0,0,0); transition: transform 0.2s ease; }
         .sidebar:not(.collapsed) { transform: translateX(0); box-shadow: 12px 0 32px rgba(0,0,0,0.18); }
