@@ -364,6 +364,39 @@ function ConfirmDialog({ message, onCancel, onConfirm }) {
   );
 }
 
+function TypeToConfirmDialog({ title, message, confirmWord, value, onChange, onCancel, onConfirm }) {
+  const matches = value.trim() === confirmWord;
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal confirm" onClick={(e) => e.stopPropagation()}>
+        <div className="confirm-icon"><AlertTriangle size={20} /></div>
+        {title && <h3 style={{ marginBottom: 6 }}>{title}</h3>}
+        <p>{message}</p>
+        <p style={{ fontSize: 12.5, color: "var(--text-soft)", marginTop: 10 }}>
+          Type <strong>{confirmWord}</strong> below to confirm.
+        </p>
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && matches) onConfirm(); }}
+          placeholder={confirmWord}
+          autoFocus
+          style={{
+            width: "100%", marginTop: 10, padding: "8px 10px", borderRadius: 8,
+            border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)",
+            fontFamily: "inherit", fontSize: 13.5, textAlign: "center",
+          }}
+        />
+        <div className="confirm-actions">
+          <button className="btn ghost" onClick={onCancel}>Cancel</button>
+          <button className="btn danger" onClick={onConfirm} disabled={!matches}>Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <label className="field">
@@ -1097,6 +1130,8 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [requestDeleteTarget, setRequestDeleteTarget] = useState(null); // asset id awaiting a reason
   const [deleteReason, setDeleteReason] = useState("");
   const [selected, setSelected] = useState([]);
+  const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
+  const [bulkDeleteText, setBulkDeleteText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
   const [transferNewLocationName, setTransferNewLocationName] = useState("");
@@ -1263,7 +1298,10 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast("Asset deleted.");
   };
 
-  const bulkDelete = async () => {
+  // The actual bulk-delete operation. Only ever invoked after the admin has
+  // typed DELETE into the confirmation modal below — never wired directly
+  // to a button, since this is destructive and irreversible.
+  const performBulkDelete = async () => {
     const removedLogs = data.maintenance.filter((m) => selected.includes(m.assetId)).length;
     const suffix = removedLogs > 0 ? ` (and ${removedLogs} maintenance record${removedLogs > 1 ? "s" : ""})` : "";
     const next = withLog({
@@ -1273,8 +1311,15 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }, currentUser, `Deleted ${selected.length} asset(s) in bulk${suffix}`);
     persist(next);
     setSelected([]);
+    setBulkDeleteConfirmOpen(false);
+    setBulkDeleteText("");
     showToast(`${selected.length} asset(s) deleted.`);
   };
+
+  // Clicking "Delete (N)" never deletes directly — it opens a second
+  // confirmation modal that requires typing DELETE, since bulk-deleting
+  // many assets at once is easy to trigger by accident.
+  const bulkDelete = () => setBulkDeleteConfirmOpen(true);
 
   // Posts a comment on an asset. Notifies the account that originally added
   // the asset, every user account assigned to manage that asset's
@@ -1526,13 +1571,15 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           <table>
             <thead>
               <tr>
-                <th style={{ width: 32 }}>
-                  <input
-                    type="checkbox"
-                    checked={visibleAssets.length > 0 && selected.length === visibleAssets.length}
-                    onChange={(e) => setSelected(e.target.checked ? visibleAssets.map((a) => a.id) : [])}
-                  />
-                </th>
+                {isAdmin && (
+                  <th style={{ width: 32 }}>
+                    <input
+                      type="checkbox"
+                      checked={visibleAssets.length > 0 && selected.length === visibleAssets.length}
+                      onChange={(e) => setSelected(e.target.checked ? visibleAssets.map((a) => a.id) : [])}
+                    />
+                  </th>
+                )}
                 <SortTh label="Category" sortKey="category" />
                 <SortTh label="Asset Tag" sortKey="tag" />
                 <SortTh label="Name" sortKey="name" />
@@ -1544,7 +1591,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
             </thead>
             <tbody>
               {visibleAssets.length === 0 && (
-                <tr><td colSpan={8} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
+                <tr><td colSpan={isAdmin ? 8 : 7} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
               )}
               {sortedAssets.map((a) => {
                 const cat = data.categories.find((c) => c.id === a.categoryId);
@@ -1552,15 +1599,17 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                 const brandModel = [a.brand, a.model].filter(Boolean).join(" / ");
                 return (
                   <tr key={a.id}>
-                    <td className="checkbox-cell">
-                      <input
-                        type="checkbox"
-                        checked={selected.includes(a.id)}
-                        onChange={(e) =>
-                          setSelected((s) => (e.target.checked ? [...s, a.id] : s.filter((x) => x !== a.id)))
-                        }
-                      />
-                    </td>
+                    {isAdmin && (
+                      <td className="checkbox-cell">
+                        <input
+                          type="checkbox"
+                          checked={selected.includes(a.id)}
+                          onChange={(e) =>
+                            setSelected((s) => (e.target.checked ? [...s, a.id] : s.filter((x) => x !== a.id)))
+                          }
+                        />
+                      </td>
+                    )}
                     <td data-label="Category">
                       {cat && <span className="cat-dot" style={{ background: categoryColor(data.categories, a.categoryId) }} />}
                       {cat?.name || "—"}
@@ -1612,6 +1661,21 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           message="Delete this asset? This cannot be undone."
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => remove(confirmDelete)}
+        />
+      )}
+      {bulkDeleteConfirmOpen && (
+        <TypeToConfirmDialog
+          title="Delete Multiple Assets"
+          message={`You're about to permanently delete ${selected.length} asset(s)${
+            data.maintenance.filter((m) => selected.includes(m.assetId)).length > 0
+              ? " along with their maintenance records"
+              : ""
+          }. This cannot be undone.`}
+          confirmWord="DELETE"
+          value={bulkDeleteText}
+          onChange={setBulkDeleteText}
+          onCancel={() => { setBulkDeleteConfirmOpen(false); setBulkDeleteText(""); }}
+          onConfirm={performBulkDelete}
         />
       )}
       {requestDeleteTarget && (
@@ -2933,6 +2997,7 @@ function GlobalStyles() {
       }
       .theme-light, .theme-dark { min-height: 100vh; background: var(--bg); color: var(--text); font-family: 'Poppins', system-ui, sans-serif; }
       * { box-sizing: border-box; }
+      button, input, select, textarea { font-family: inherit; }
       h1,h2,h3 { font-family: 'Poppins', sans-serif; margin: 0; }
 
       .boot { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
