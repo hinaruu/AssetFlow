@@ -573,6 +573,7 @@ export default function App() {
             syncing={syncing}
             lastSynced={lastSynced}
             data={data}
+            persist={persist}
           />
           <div className="content">
             {view === "dashboard" && (
@@ -668,7 +669,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
 /* ---------------------------------------------------------
    Top Bar
 --------------------------------------------------------- */
-function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, onToggleSidebar }) {
+function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, onToggleSidebar, persist }) {
   const [notifOpen, setNotifOpen] = useState(false);
   const isAdmin = currentUser.role === "Admin";
   const locName = scopedLocationId
@@ -680,7 +681,20 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
 
   const alerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
-  const notifCount = alerts.length;
+  const myComments = useMemo(
+    () => (data.comments || []).filter((c) => c.targetUserId === currentUser.id && !c.read)
+      .sort((a, b) => new Date(b.at) - new Date(a.at)),
+    [data.comments, currentUser.id]
+  );
+  const notifCount = alerts.length + myComments.length;
+
+  const markCommentRead = (commentId) => {
+    if (!persist) return;
+    persist({
+      ...data,
+      comments: (data.comments || []).map((c) => (c.id === commentId ? { ...c, read: true } : c)),
+    });
+  };
 
   return (
     <div className="topbar">
@@ -709,6 +723,22 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
                 {alerts.slice(0, 8).map((a) => (
                   <div key={a.id} className={`notif-item ${a.urgent ? "urgent" : ""}`}>{a.label}</div>
                 ))}
+                <div className="notif-section-title" style={{ marginTop: 10 }}>Comments</div>
+                {myComments.length === 0 && <div className="notif-empty">No new comments.</div>}
+                {myComments.map((c) => {
+                  const asset = data.assets.find((a) => a.id === c.assetId);
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      className="notif-item notif-item-btn"
+                      onClick={() => markCommentRead(c.id)}
+                      title="Mark as read"
+                    >
+                      <strong>{c.authorName}</strong> on {asset?.tag || "an asset"}: {c.message}
+                    </button>
+                  );
+                })}
                 {isAdmin && (
                   <>
                     <div className="notif-section-title" style={{ marginTop: 10 }}>Recent Activity</div>
@@ -901,9 +931,9 @@ function emptyAsset(defaultLocationId) {
   return {
     id: null, tag: "", name: "", categoryId: "", assetType: "IT", brand: "", model: "",
     yearModel: "", serial: "", status: "", condition: "New", locationId: defaultLocationId || "",
-    assignedTo: "", purchaseDate: todayISO(), purchaseCost: "", warrantyExpiry: "",
+    assignedTo: "", purchaseDate: "", purchaseCost: "", warrantyExpiry: "",
     requiresCalibration: false, calibrationDate: "", nextCalibrationDate: "",
-    notes: "", transferHistory: [],
+    notes: "", transferHistory: [], department: "",
   };
 }
 
@@ -936,6 +966,11 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     return Array.from(set).sort();
   }, [data.assets, scopedLocationId]);
 
+  const departmentOptions = useMemo(() => {
+    const set = new Set(data.assets.map((a) => a.department).filter(Boolean));
+    return Array.from(set).sort();
+  }, [data.assets]);
+
   const visibleAssets = useMemo(() => {
     let list = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
     if (locationFilter !== "all") list = list.filter((a) => a.locationId === locationFilter);
@@ -948,7 +983,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         const cat = data.categories.find((c) => c.id === a.categoryId)?.name || "";
         const haystack = [
           a.tag, a.name, a.serial, a.brand, a.model, a.status, a.condition,
-          a.assignedTo, a.notes, loc, cat,
+          a.assignedTo, a.notes, a.department, loc, cat,
         ].join(" ").toLowerCase();
         return haystack.includes(q);
       });
@@ -1055,6 +1090,34 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast(`${selected.length} asset(s) deleted.`);
   };
 
+  // Posts a comment on an asset. If the asset is assigned to someone with a
+  // login account (matched by name), it's flagged unread for them so it
+  // shows up in their notification bell.
+  const addComment = (assetId, message) => {
+    const text = (message || "").trim();
+    if (!text) return;
+    const asset = data.assets.find((a) => a.id === assetId);
+    const target = asset?.assignedTo
+      ? data.users.find((u) => u.name.toLowerCase() === asset.assignedTo.toLowerCase() && u.id !== currentUser.id)
+      : null;
+    const comment = {
+      id: uid("cmt"),
+      assetId,
+      at: new Date().toISOString(),
+      authorId: currentUser.id,
+      authorName: currentUser.name,
+      message: text,
+      targetUserId: target?.id || null,
+      read: false,
+    };
+    const next = withLog({
+      ...data,
+      comments: [comment, ...(data.comments || [])],
+    }, currentUser, `Commented on asset "${asset?.name || asset?.tag}"`);
+    persist(next);
+    showToast("Comment sent.");
+  };
+
   const duplicateAsset = (asset) => {
     setEditing({
       ...asset,
@@ -1149,12 +1212,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
   };
 
-  const EXPORT_COLS = ["tag", "name", "assetType", "brand", "model", "yearModel", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
+  const EXPORT_COLS = ["tag", "name", "department", "assetType", "brand", "model", "yearModel", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
 
   const buildCSV = () => {
     const rows = visibleAssets.map((a) => {
       const loc = data.locations.find((l) => l.id === a.locationId)?.name || "";
-      return [a.tag, a.name, a.assetType, a.brand, a.model, a.yearModel, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.requiresCalibration ? "Yes" : "No", a.calibrationDate, a.nextCalibrationDate];
+      return [a.tag, a.name, a.department, a.assetType, a.brand, a.model, a.yearModel, a.serial, a.status, a.condition, loc, a.assignedTo, a.purchaseDate, a.purchaseCost, a.warrantyExpiry, a.requiresCalibration ? "Yes" : "No", a.calibrationDate, a.nextCalibrationDate];
     });
     return [EXPORT_COLS.join(","), ...rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
   };
@@ -1227,6 +1290,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
             id: uid("ast"),
             tag: row.tag || `AST-IMP-${String(i).padStart(3, "0")}`,
             name: row.name || "Imported Asset",
+            department: row.department || "",
             categoryId: cat?.id || data.categories[0]?.id || "",
             assetType: row.assetType === "Non-IT" ? "Non-IT" : "IT",
             brand: row.brand || "",
@@ -1379,6 +1443,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           isAdmin={isAdmin}
           scopedLocationId={scopedLocationId}
           existingAssets={data.assets}
+          departmentOptions={departmentOptions}
           onClose={() => setEditing(null)}
           onSave={save}
         />
@@ -1427,6 +1492,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           categories={data.categories}
           locations={data.locations}
           isAdmin={isAdmin}
+          comments={(data.comments || []).filter((c) => c.assetId === viewing.id)}
+          currentUser={currentUser}
+          onAddComment={(message) => addComment(viewing.id, message)}
           onClose={() => setViewing(null)}
           onEdit={() => { setEditing(viewing); setViewing(null); }}
           onDuplicate={() => { duplicateAsset(viewing); setViewing(null); }}
@@ -1487,7 +1555,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   );
 }
 
-function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, onClose, onSave }) {
+function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, departmentOptions, onClose, onSave }) {
   const [form, setForm] = useState(asset);
   const [hasPurchaseInfo, setHasPurchaseInfo] = useState(!!(asset.purchaseDate || asset.purchaseCost));
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -1564,6 +1632,17 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
             ))}
           </select>
         </Field>
+        <Field label="Department">
+          <input
+            list="department-list"
+            value={form.department || ""}
+            onChange={(e) => set("department", e.target.value)}
+            placeholder="e.g. Finance, HR, IT"
+          />
+          <datalist id="department-list">
+            {departmentOptions.map((d) => <option key={d} value={d} />)}
+          </datalist>
+        </Field>
         <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} /></Field>
         <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} /></Field>
         <Field label="Manufactured Year / Year Model">
@@ -1631,7 +1710,14 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
           <input value={form.assignedTo} onChange={(e) => onAssignedToChange(e.target.value)} />
         </Field>
         <Field label="Add Purchase Info?">
-          <select value={hasPurchaseInfo ? "yes" : "no"} onChange={(e) => setHasPurchaseInfo(e.target.value === "yes")}>
+          <select
+            value={hasPurchaseInfo ? "yes" : "no"}
+            onChange={(e) => {
+              const yes = e.target.value === "yes";
+              setHasPurchaseInfo(yes);
+              if (yes && !form.purchaseDate) set("purchaseDate", todayISO());
+            }}
+          >
             <option value="no">No</option>
             <option value="yes">Yes</option>
           </select>
@@ -1682,9 +1768,16 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, comments, currentUser, onAddComment, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
+  const [commentText, setCommentText] = useState("");
+  const sortedComments = [...(comments || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+  const submitComment = () => {
+    if (!commentText.trim()) return;
+    onAddComment(commentText);
+    setCommentText("");
+  };
   const row = (label, value, full) => (
     <div className={`detail-row${full ? " detail-full" : ""}`}>
       <span className="detail-label">{label}</span>
@@ -1695,6 +1788,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
     <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={760}>
       <div className="detail-grid">
         {row("Name", asset.name)}
+        {row("Department", asset.department)}
         {row("Category", cat && (
           <span style={{ display: "inline-flex", alignItems: "center" }}>
             <span className="cat-dot" style={{ background: categoryColor(categories, asset.categoryId) }} />
@@ -1715,7 +1809,42 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, onClose, onEd
         {asset.assetType === "Non-IT" && row("Requires Calibration?", asset.requiresCalibration ? "Yes" : "No")}
         {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Calibration Date", asset.calibrationDate)}
         {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Next Recalibration Date", asset.nextCalibrationDate)}
-        {row("Notes", asset.notes, true)}
+      </div>
+
+      <div className="detail-full">
+        <div className="notif-section-title" style={{ marginTop: 14 }}>Notes</div>
+        <div className="notes-highlight">
+          {asset.notes || "No notes yet."}
+        </div>
+      </div>
+
+      <div className="detail-full comments-section">
+        <div className="notif-section-title" style={{ marginTop: 14 }}>Comments</div>
+        <div className="comment-list">
+          {sortedComments.length === 0 && (
+            <div className="notif-empty">No comments yet — use this to clarify something with the assigned user.</div>
+          )}
+          {sortedComments.map((c) => (
+            <div key={c.id} className="comment-item">
+              <div className="comment-meta">
+                <span className="comment-author">{c.authorName}</span>
+                <span className="comment-time">{new Date(c.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+              </div>
+              <div className="comment-text">{c.message}</div>
+            </div>
+          ))}
+        </div>
+        <div className="comment-composer">
+          <textarea
+            value={commentText}
+            onChange={(e) => setCommentText(e.target.value)}
+            rows={2}
+            placeholder={asset.assignedTo ? `Message ${asset.assignedTo} about this asset…` : "Add a comment…"}
+          />
+          <button type="button" className="btn primary" onClick={submitComment} disabled={!commentText.trim()}>
+            Send
+          </button>
+        </div>
       </div>
 
       {asset.transferHistory && asset.transferHistory.length > 0 && (
@@ -2547,7 +2676,7 @@ function ResetPasswordModal({ onClose, onConfirm }) {
 function GlobalStyles() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Inter:wght@400;500;600&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
 
       .theme-light {
         --bg: #F7F8FA; --surface: #FFFFFF; --border: #E5E7EB; --text: #111827;
@@ -2557,9 +2686,9 @@ function GlobalStyles() {
         --bg: #12141A; --surface: #1A1D24; --border: #2A2E38; --text: #F3F4F6;
         --text-soft: #9CA3AF; --accent: #818CF8; --accent-soft: #262B45; --danger: #F87171;
       }
-      .theme-light, .theme-dark { min-height: 100vh; background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; }
+      .theme-light, .theme-dark { min-height: 100vh; background: var(--bg); color: var(--text); font-family: 'Poppins', system-ui, sans-serif; }
       * { box-sizing: border-box; }
-      h1,h2,h3 { font-family: 'Sora', 'Inter', sans-serif; margin: 0; }
+      h1,h2,h3 { font-family: 'Poppins', sans-serif; margin: 0; }
 
       .boot { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
       .spinner { width: 28px; height: 28px; border-radius: 999px; border: 3px solid #ddd; border-top-color: #4F46E5; animation: spin 0.8s linear infinite; }
@@ -2567,7 +2696,7 @@ function GlobalStyles() {
 
       .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
       .login-card { width: 360px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; }
-      .login-logo { display: flex; align-items: center; gap: 8px; font-family: 'Sora', sans-serif; font-weight: 700; font-size: 18px; color: var(--accent); }
+      .login-logo { display: flex; align-items: center; gap: 8px; font-family: 'Poppins', sans-serif; font-weight: 700; font-size: 18px; color: var(--accent); }
       .login-sub { color: var(--text-soft); font-size: 13px; margin: 6px 0 22px; }
       .login-hint { margin-top: 16px; font-size: 12px; color: var(--text-soft); text-align: center; }
       .form-error { background: #FEE2E2; color: #B91C1C; padding: 8px 10px; border-radius: 8px; font-size: 12.5px; margin-bottom: 12px; }
@@ -2576,7 +2705,7 @@ function GlobalStyles() {
       .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.18s ease; flex-shrink: 0; overflow: hidden; }
       .sidebar.collapsed { width: 64px; }
       .sidebar-top { display: flex; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-      .brand { display: flex; align-items: center; gap: 8px; font-family: 'Sora', sans-serif; font-weight: 700; color: var(--accent); white-space: nowrap; }
+      .brand { display: flex; align-items: center; gap: 8px; font-family: 'Poppins', sans-serif; font-weight: 700; color: var(--accent); white-space: nowrap; }
       .brand-mini { display: flex; align-items: center; justify-content: center; color: var(--accent); width: 100%; }
       nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
       .nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: none; background: none; color: var(--text-soft); cursor: pointer; font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; }
@@ -2608,6 +2737,8 @@ function GlobalStyles() {
       .notif-item:last-child { border-bottom: none; }
       .notif-item.urgent { color: var(--danger); font-weight: 600; }
       .notif-empty { font-size: 12.5px; color: var(--text-soft); padding: 4px 0 8px; }
+      .notif-item-btn { display: block; width: 100%; text-align: left; background: none; border: none; font: inherit; color: inherit; cursor: pointer; padding: 6px 0; }
+      .notif-item-btn:hover { color: var(--accent); }
 
       .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
       .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
@@ -2616,6 +2747,17 @@ function GlobalStyles() {
       .detail-label { color: var(--text-soft); font-weight: 500; }
       .detail-value { font-weight: 600; text-align: right; }
       .detail-transfer-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+      .notes-highlight { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+
+      .comments-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+      .comment-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; margin-bottom: 10px; }
+      .comment-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+      .comment-meta { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-soft); margin-bottom: 4px; }
+      .comment-author { font-weight: 700; }
+      .comment-text { font-size: 13px; line-height: 1.4; white-space: pre-wrap; }
+      .comment-composer { display: flex; gap: 8px; align-items: flex-end; }
+      .comment-composer textarea { flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; background: var(--bg); color: var(--text); font-family: inherit; resize: vertical; }
 
       .content { padding: 24px; flex: 1; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; }
       .content::-webkit-scrollbar { display: none; }
@@ -2628,7 +2770,7 @@ function GlobalStyles() {
       .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
       .metric { background: var(--surface); border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
       .metric-icon { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
-      .metric-value { font-size: 26px; font-weight: 700; font-family: 'Sora', sans-serif; }
+      .metric-value { font-size: 26px; font-weight: 700; font-family: 'Poppins', sans-serif; }
       .metric-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
 
       .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }

@@ -55,7 +55,7 @@ const TABLES = {
   assets: {
     table: "assets",
     toRow: (a) => ({
-      id: a.id, tag: a.tag || null, name: a.name || null,
+      id: a.id, tag: a.tag || null, name: a.name || null, department: a.department || null,
       category_id: a.categoryId || null, asset_type: a.assetType || null,
       brand: a.brand || null, model: a.model || null, year_model: a.yearModel || null, serial: a.serial || null,
       status: a.status || null, condition: a.condition || null,
@@ -70,7 +70,7 @@ const TABLES = {
       updated_at: new Date().toISOString(),
     }),
     fromRow: (r) => ({
-      id: r.id, tag: r.tag, name: r.name, categoryId: r.category_id, assetType: r.asset_type,
+      id: r.id, tag: r.tag, name: r.name, department: r.department, categoryId: r.category_id, assetType: r.asset_type,
       brand: r.brand, model: r.model, yearModel: r.year_model, serial: r.serial, status: r.status, condition: r.condition,
       locationId: r.location_id, assignedTo: r.assigned_to,
       purchaseDate: r.purchase_date, purchaseCost: r.purchase_cost, warrantyExpiry: r.warranty_expiry,
@@ -93,6 +93,19 @@ const TABLES = {
     table: "audit_log",
     toRow: (e) => ({ id: e.id, at: e.at, user_id: e.userId || null, user_name: e.userName || null, message: e.message || null }),
     fromRow: (r) => ({ id: r.id, at: r.at, userId: r.user_id, userName: r.user_name, message: r.message }),
+  },
+  comments: {
+    table: "comments",
+    toRow: (c) => ({
+      id: c.id, asset_id: c.assetId || null, at: c.at,
+      author_id: c.authorId || null, author_name: c.authorName || null,
+      message: c.message || null, target_user_id: c.targetUserId || null, read: !!c.read,
+    }),
+    fromRow: (r) => ({
+      id: r.id, assetId: r.asset_id, at: r.at,
+      authorId: r.author_id, authorName: r.author_name,
+      message: r.message, targetUserId: r.target_user_id, read: r.read,
+    }),
   },
 };
 
