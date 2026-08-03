@@ -1049,7 +1049,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
       }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`);
     } else {
-      const newAsset = { ...assetFields, id: uid("ast"), tag: String(assetFields.tag || "").trim() || nextAutoTag(data.assets) };
+      const newAsset = {
+        ...assetFields,
+        id: uid("ast"),
+        tag: String(assetFields.tag || "").trim() || nextAutoTag(data.assets),
+        createdById: currentUser.id,
+        createdByName: currentUser.name,
+      };
       if (newAsset.status === "Under Repair") {
         autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       }
@@ -1092,17 +1098,15 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast(`${selected.length} asset(s) deleted.`);
   };
 
-  // Posts a comment on an asset. Notifies the Regional Staff user(s) for
-  // that asset's location/country (not whoever it's assigned to) — so it
-  // shows up in their notification bell until each of them reads it.
+  // Posts a comment on an asset. Notifies the specific registered account
+  // that originally added the asset (not whoever it's assigned to) — so it
+  // shows up in their notification bell until they read it.
   const addComment = (assetId, message) => {
     const text = (message || "").trim();
     if (!text) return;
     const asset = data.assets.find((a) => a.id === assetId);
-    const targetUserIds = asset?.locationId
-      ? data.users
-          .filter((u) => u.role !== "Admin" && u.locationId === asset.locationId && u.id !== currentUser.id)
-          .map((u) => u.id)
+    const targetUserIds = asset?.createdById && asset.createdById !== currentUser.id
+      ? [asset.createdById]
       : [];
     const comment = {
       id: uid("cmt"),
@@ -1807,6 +1811,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
         {row("Condition", asset.condition)}
         {row("Location", loc?.name)}
         {row("Assigned To", asset.assignedTo)}
+        {row("Added By", asset.createdByName)}
         {row("Purchase Date", asset.purchaseDate)}
         {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
         {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
@@ -1843,7 +1848,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
             value={commentText}
             onChange={(e) => setCommentText(e.target.value)}
             rows={2}
-            placeholder={loc?.name ? `Message the ${loc.name} team about this asset…` : "Add a comment…"}
+            placeholder={asset.createdByName ? `Message ${asset.createdByName} (added this asset) about this…` : "Add a comment…"}
           />
           <button type="button" className="btn primary" onClick={submitComment} disabled={!commentText.trim()}>
             Send

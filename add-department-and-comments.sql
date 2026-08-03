@@ -1,12 +1,16 @@
 -- Run this in Supabase SQL Editor.
--- 1) Adds a "department" column to the existing assets table.
+-- 1) Adds a "department" column to the existing assets table, plus
+--    created_by_id/created_by_name so comments can notify the specific
+--    account that added the asset.
 -- 2) Creates (or upgrades) a "comments" table for per-asset comments —
---    each comment can notify multiple people (the regional users for that
---    asset's location) and tracks read/unread per person.
+--    each comment can notify one or more people and tracks read/unread
+--    per person.
 -- Safe to run even if some of this already exists, including if you
 -- already ran an earlier version of this file with a single target_user_id.
 
 alter table assets add column if not exists department text;
+alter table assets add column if not exists created_by_id text;
+alter table assets add column if not exists created_by_name text;
 
 create table if not exists comments (
   id text primary key,
