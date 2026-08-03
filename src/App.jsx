@@ -1368,6 +1368,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast("Comment sent.");
   };
 
+  // Starts a "New Asset" draft. Non-admins are fixed to their own assigned
+  // location, same as when duplicating — the field is locked in the modal.
+  const newAssetDraft = () => ({
+    ...emptyAsset(scopedLocationId),
+    _lockLocationField: !isAdmin,
+  });
+
   const duplicateAsset = (asset) => {
     setEditing({
       ...asset,
@@ -1569,13 +1576,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
               <button className="btn ghost" onClick={exportExcel}><Download size={14} /> Export Excel</button>
             </>
           )}
-          <button className="btn primary new-asset-btn" onClick={() => setEditing(emptyAsset(scopedLocationId))}>
+          <button className="btn primary new-asset-btn" onClick={() => setEditing(newAssetDraft())}>
             <Plus size={14} /> New Asset
           </button>
         </div>
       </div>
 
-      <button className="fab-add" onClick={() => setEditing(emptyAsset(scopedLocationId))} title="New Asset">
+      <button className="fab-add" onClick={() => setEditing(newAssetDraft())} title="New Asset">
         <Plus size={22} />
       </button>
 
@@ -2176,7 +2183,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
                 disabled={!!asset._lockLocationField}
               />
               {!!asset._lockLocationField && (
-                <span className="field-hint">Duplicated assets keep your assigned location.</span>
+                <span className="field-hint">Fixed to your assigned location.</span>
               )}
             </Field>
           </div>
