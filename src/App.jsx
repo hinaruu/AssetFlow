@@ -4,7 +4,7 @@ import {
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
   KeyRound, ShieldCheck, AlertTriangle, RefreshCw,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
-  ChevronUp, ChevronDown, ChevronsUpDown,
+  ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
@@ -392,8 +392,16 @@ export default function App() {
   const [connectionError, setConnectionError] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
+  const [focusAssetId, setFocusAssetId] = useState(null);
   const dataRef = React.useRef(null);
   useEffect(() => { dataRef.current = data; }, [data]);
+
+  // Clicking a comment notification in the bell jumps straight to that
+  // asset's detail view, wherever the user currently is in the app.
+  const openAssetFromNotif = useCallback((assetId) => {
+    setView("assets");
+    setFocusAssetId(assetId);
+  }, []);
 
   const showToast = useCallback((msg) => {
     setToast({ message: msg, phase: "in" });
@@ -574,6 +582,7 @@ export default function App() {
             lastSynced={lastSynced}
             data={data}
             persist={persist}
+            onOpenAsset={openAssetFromNotif}
           />
           <div className="content">
             {view === "dashboard" && (
@@ -587,6 +596,8 @@ export default function App() {
                 scopedLocationId={scopedLocationId}
                 showToast={showToast}
                 currentUser={currentUser}
+                focusAssetId={focusAssetId}
+                onFocusHandled={() => setFocusAssetId(null)}
               />
             )}
             {view === "maintenance" && (
@@ -669,7 +680,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
 /* ---------------------------------------------------------
    Top Bar
 --------------------------------------------------------- */
-function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, onToggleSidebar, persist }) {
+function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLocationId, onSync, syncing, lastSynced, data, onToggleSidebar, persist, onOpenAsset }) {
   const [notifOpen, setNotifOpen] = useState(false);
   const isAdmin = currentUser.role === "Admin";
   const locName = scopedLocationId
@@ -696,6 +707,12 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
         c.id === commentId ? { ...c, readBy: [...(c.readBy || []), currentUser.id] } : c
       ),
     });
+  };
+
+  const openComment = (comment) => {
+    markCommentRead(comment.id);
+    setNotifOpen(false);
+    if (onOpenAsset) onOpenAsset(comment.assetId);
   };
 
   return (
@@ -734,10 +751,10 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
                       key={c.id}
                       type="button"
                       className="notif-item notif-item-btn"
-                      onClick={() => markCommentRead(c.id)}
-                      title="Mark as read"
+                      onClick={() => openComment(c)}
+                      title="View asset"
                     >
-                      <strong>{c.authorName}</strong> on {asset?.tag || "an asset"}: {c.message}
+                      {c.authorName} commented on Asset #{asset?.tag || "—"}
                     </button>
                   );
                 })}
@@ -939,13 +956,54 @@ function emptyAsset(defaultLocationId) {
   };
 }
 
-function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, currentUser }) {
+function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, currentUser, focusAssetId, onFocusHandled }) {
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [userFilter, setUserFilter] = useState("all");
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
+
+  // A comment notification was clicked elsewhere in the app — jump straight
+  // to that asset's detail view, then clear the request so it doesn't refire.
+  useEffect(() => {
+    if (!focusAssetId) return;
+    const a = data.assets.find((x) => x.id === focusAssetId);
+    if (a) setViewing(a);
+    if (onFocusHandled) onFocusHandled();
+  }, [focusAssetId, data.assets, onFocusHandled]);
+
+  // Assets with an unread comment for the current user — shown as a small
+  // indicator in the table so the person who added an asset notices right
+  // away that there's an update on it.
+  const unreadCommentAssetIds = useMemo(() => {
+    const set = new Set();
+    (data.comments || []).forEach((c) => {
+      if ((c.targetUserIds || []).includes(currentUser.id) && !(c.readBy || []).includes(currentUser.id)) {
+        set.add(c.assetId);
+      }
+    });
+    return set;
+  }, [data.comments, currentUser.id]);
+
+  // Opening an asset's detail view (from the table, or from a notification)
+  // also clears its unread-comment flag for the current user.
+  useEffect(() => {
+    if (!viewing) return;
+    const hasUnread = (data.comments || []).some(
+      (c) => c.assetId === viewing.id && (c.targetUserIds || []).includes(currentUser.id) && !(c.readBy || []).includes(currentUser.id)
+    );
+    if (!hasUnread) return;
+    persist({
+      ...data,
+      comments: (data.comments || []).map((c) =>
+        c.assetId === viewing.id && (c.targetUserIds || []).includes(currentUser.id) && !(c.readBy || []).includes(currentUser.id)
+          ? { ...c, readBy: [...(c.readBy || []), currentUser.id] }
+          : c
+      ),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewing?.id]);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [requestDeleteTarget, setRequestDeleteTarget] = useState(null); // asset id awaiting a reason
   const [deleteReason, setDeleteReason] = useState("");
@@ -1419,6 +1477,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     </td>
                     <td data-label="Asset Tag">
                       <button className="link-tag" onClick={() => setViewing(a)} title="View details — edit, duplicate, transfer, delete">{a.tag}</button>
+                      {unreadCommentAssetIds.has(a.id) && (
+                        <MessageCircle size={13} className="comment-flag" title="New comment on this asset" />
+                      )}
                     </td>
                     <td data-label="Name">
                       {a.name}
@@ -2735,6 +2796,7 @@ function GlobalStyles() {
 
       .link-tag { background: none; border: none; padding: 0; font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
       .link-tag:hover { opacity: 0.8; }
+      .comment-flag { color: var(--danger); margin-left: 6px; vertical-align: middle; }
 
       .notif-wrap { position: relative; }
       .notif-dot { position: absolute; top: -3px; right: -3px; background: var(--danger); color: white; font-size: 9.5px; font-weight: 700; border-radius: 999px; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
