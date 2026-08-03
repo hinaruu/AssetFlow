@@ -1402,6 +1402,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
 
   const submitTransfer = () => {
     const creatingLocation = transferLocationId === "__new__";
+    if (creatingLocation && !isAdmin) { alert("Only an Administrator can add a new location."); return; }
     if (!transferLocationId) { alert("Please select a destination location."); return; }
     if (creatingLocation && !transferNewLocationName.trim()) { alert("Please enter a name for the new location."); return; }
     if (!transferReason.trim()) { alert("Please enter a reason for this transfer."); return; }
@@ -1746,7 +1747,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                   {data.locations.filter((l) => l.id !== data.assets.find((a) => a.id === transferTarget)?.locationId).map((l) => (
                     <option key={l.id} value={l.id}>{l.name}</option>
                   ))}
-                  <option value="__new__">+ Add new location…</option>
+                  {isAdmin && <option value="__new__">+ Add new location…</option>}
                 </select>
               </Field>
             </div>
