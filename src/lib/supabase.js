@@ -68,6 +68,7 @@ const TABLES = {
       notes: a.notes || null, pre_repair_status: a.preRepairStatus || null,
       transfer_history: a.transferHistory || [],
       created_by_id: a.createdById || null, created_by_name: a.createdByName || null,
+      pending_deletion: a.pendingDeletion || null,
       updated_at: new Date().toISOString(),
     }),
     fromRow: (r) => ({
@@ -79,6 +80,7 @@ const TABLES = {
       nextCalibrationDate: r.next_calibration_date, notes: r.notes,
       preRepairStatus: r.pre_repair_status, transferHistory: r.transfer_history || [],
       createdById: r.created_by_id, createdByName: r.created_by_name,
+      pendingDeletion: r.pending_deletion || null,
     }),
   },
   maintenance: {
