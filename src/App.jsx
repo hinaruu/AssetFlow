@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
-  LayoutDashboard, Package, Wrench, MapPin, Tags, Users, LogOut,
+  LayoutDashboard, Package, Wrench, MapPin, Tags, Users, User, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  KeyRound, ShieldCheck, AlertTriangle,
+  KeyRound, ShieldCheck, AlertTriangle, Info,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
@@ -397,10 +397,13 @@ function TypeToConfirmDialog({ title, message, confirmWord, value, onChange, onC
   );
 }
 
-function Field({ label, children }) {
+function Field({ label, children, required, className, action }) {
   return (
-    <label className="field">
-      <span>{label}</span>
+    <label className={`field ${className || ""}`}>
+      <span className="field-label-row">
+        <span>{label}{required && <span className="required-mark">*</span>}</span>
+        {action}
+      </span>
       {children}
     </label>
   );
@@ -1749,14 +1752,192 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   );
 }
 
+/* ---------------------------------------------------------
+   New Asset form building blocks — section cards, toggle switch,
+   a colored-badge status picker, and a lightweight searchable
+   combobox (no external deps). Used by AssetModal below.
+--------------------------------------------------------- */
+function FormSection({ icon: Icon, title, children, action }) {
+  return (
+    <div className="form-section">
+      <div className="form-section-head">
+        <span className="form-section-head-icon"><Icon size={14} /></span>
+        <h4>{title}</h4>
+        {action && <div className="form-section-head-action">{action}</div>}
+      </div>
+      <div className="section-grid">{children}</div>
+    </div>
+  );
+}
+
+function ToggleSwitch({ checked, onChange, label }) {
+  return (
+    <label className="toggle-switch-wrap">
+      <span className="toggle-switch">
+        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <span className="toggle-slider" />
+      </span>
+      {label && <span>{label}</span>}
+    </label>
+  );
+}
+
+// Custom colored-badge dropdown for Status, so each option reads as a
+// status pill (matching the colors already used elsewhere in the app)
+// instead of a plain text list.
+function StatusPicker({ value, onChange, placeholder = "Select status" }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const color = STATUS_COLORS[value] || "#9CA3AF";
+
+  return (
+    <div className="status-picker" ref={ref}>
+      <button type="button" className="status-picker-trigger" onClick={() => setOpen((o) => !o)}>
+        {value ? (
+          <span className="status-dot-badge" style={{ background: `${color}1a`, color, border: `1px solid ${color}40` }}>
+            <span className="status-dot" style={{ background: color }} />
+            {value}
+          </span>
+        ) : (
+          <span className="status-picker-placeholder">{placeholder}</span>
+        )}
+        <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="status-picker-menu">
+          {STATUS_OPTIONS.map((s) => {
+            const c = STATUS_COLORS[s];
+            return (
+              <button
+                type="button"
+                key={s}
+                className="status-picker-option"
+                onMouseDown={() => { onChange(s); setOpen(false); }}
+              >
+                <span className="status-dot" style={{ background: c }} />
+                {s}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Lightweight searchable combobox — filters a list of {value, label}
+// options as you type. With allowCustom (Department / Assigned To / Brand)
+// the typed text itself is the value, and picking a suggestion just fills
+// it in. Without it (Location) the value must be one of the option ids.
+function SearchableSelect({ value, onChange, options, placeholder = "Search…", allowCustom = true }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef(null);
+
+  const selectedLabel = useMemo(() => {
+    if (allowCustom) return value || "";
+    const opt = options.find((o) => o.value === value);
+    return opt ? opt.label : "";
+  }, [value, options, allowCustom]);
+
+  useEffect(() => {
+    if (!open) setQuery(selectedLabel);
+  }, [selectedLabel, open]);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => o.label.toLowerCase().includes(q));
+  }, [query, options]);
+
+  const pick = (opt) => {
+    onChange(allowCustom ? opt.label : opt.value);
+    setQuery(opt.label);
+    setOpen(false);
+  };
+
+  return (
+    <div className="searchable-select" ref={ref}>
+      <input
+        value={open ? query : selectedLabel}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+          if (allowCustom) onChange(e.target.value);
+        }}
+        onFocus={() => { setOpen(true); setQuery(selectedLabel); }}
+        placeholder={placeholder}
+      />
+      {!allowCustom && value && (
+        <button type="button" className="searchable-select-clear" title="Clear" onMouseDown={(e) => { e.preventDefault(); onChange(""); setQuery(""); }}>
+          <X size={12} />
+        </button>
+      )}
+      {open && filtered.length > 0 && (
+        <div className="searchable-select-menu">
+          {filtered.map((o) => (
+            <div key={o.value} className="searchable-select-option" onMouseDown={() => pick(o)}>
+              {o.label}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, departmentOptions, onClose, onSave }) {
   const [form, setForm] = useState(asset);
   const [hasPurchaseInfo, setHasPurchaseInfo] = useState(!!(asset.purchaseDate || asset.purchaseCost));
   const [hasWarrantyExpiry, setHasWarrantyExpiry] = useState(!!(asset.warrantyExpiry && asset.warrantyExpiry !== "N/A"));
+  // "New Asset" starts with the tag auto-generated (blank tag → server
+  // assigns the next ASTUTE### on save). Editing an asset always shows its
+  // real tag — auto-generate only applies at creation time.
+  const [autoTag, setAutoTag] = useState(!asset.id && !asset.tag);
+  // Optional Information starts open if there's already something in it
+  // (editing an asset that has purchase/warranty/notes data), otherwise
+  // collapsed so the main form stays short.
+  const [optionalOpen, setOptionalOpen] = useState(
+    !!(asset.purchaseDate || asset.purchaseCost || (asset.warrantyExpiry && asset.warrantyExpiry !== "N/A") || asset.notes)
+  );
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
   const wasUnderRepair = asset.status === "Under Repair";
   const needsReason = form.status === "Under Repair" && !wasUnderRepair;
+
+  const brandOptions = useMemo(() => {
+    const brandSet = new Set((existingAssets || []).map((a) => a.brand).filter(Boolean));
+    return Array.from(brandSet).sort().map((v) => ({ value: v, label: v }));
+  }, [existingAssets]);
+  const assignedToOptions = useMemo(() => {
+    const nameSet = new Set((existingAssets || []).map((a) => a.assignedTo).filter(Boolean));
+    return Array.from(nameSet).sort().map((v) => ({ value: v, label: v }));
+  }, [existingAssets]);
+  const departmentSelectOptions = useMemo(
+    () => (departmentOptions || []).map((v) => ({ value: v, label: v })),
+    [departmentOptions]
+  );
+  const locationSelectOptions = useMemo(
+    () => locations.map((l) => ({ value: l.id, label: l.name })),
+    [locations]
+  );
 
   // Typing an Assigned To name is a strong signal the asset is in use — set
   // it automatically, but only if the user hasn't already picked a status
@@ -1767,6 +1948,33 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
       assignedTo: v,
       status: !f.status && v.trim() ? "In Use" : f.status,
     }));
+  };
+
+  // Switching Asset Type narrows which categories are valid — clear the
+  // category if it no longer belongs to the newly selected type.
+  const onAssetTypeChange = (type) => {
+    setForm((f) => {
+      const stillValid = categories.some((c) => c.id === f.categoryId && c.type === type);
+      return { ...f, assetType: type, categoryId: stillValid ? f.categoryId : "" };
+    });
+  };
+
+  // Smart default: picking a category on a brand-new asset suggests a
+  // sensible starting status (Condition already defaults to "New"), so the
+  // common case — adding a fresh, in-stock item — needs no extra clicks.
+  // Never overrides a status the user already chose, and never applies to
+  // edits of an existing asset.
+  const onCategoryChange = (catId) => {
+    setForm((f) => {
+      const next = { ...f, categoryId: catId };
+      if (!asset.id && catId && !f.status) next.status = "In Stock";
+      return next;
+    });
+  };
+
+  const onAutoTagToggle = (checked) => {
+    setAutoTag(checked);
+    if (checked) set("tag", "");
   };
 
   const submit = (e) => {
@@ -1806,174 +2014,182 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
   };
 
   return (
-    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={760}>
-      <div className="form-grid">
-        <Field label="Asset Tag">
-          <input value={form.tag} onChange={(e) => set("tag", e.target.value)} placeholder="Auto-generated (e.g. ASTUTE001) if left blank" />
-        </Field>
-        <Field label="Asset Type">
-          <select value={form.assetType} onChange={(e) => set("assetType", e.target.value)}>
-            <option value="IT">IT Asset</option>
-            <option value="Non-IT">Non-IT Asset</option>
-          </select>
-        </Field>
-        <Field label="Name">
-          <input value={form.name} onChange={(e) => set("name", e.target.value)} required />
-        </Field>
-        <Field label="Category (required)">
-          <select value={form.categoryId} onChange={(e) => set("categoryId", e.target.value)} required>
-            <option value="">Select category</option>
-            {categories.filter((c) => c.type === form.assetType).map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Department">
-          <input
-            list="department-list"
-            value={form.department || ""}
-            onChange={(e) => set("department", e.target.value)}
-            placeholder="e.g. Finance, HR, IT"
-          />
-          <datalist id="department-list">
-            {departmentOptions.map((d) => <option key={d} value={d} />)}
-          </datalist>
-        </Field>
-        <Field label="Brand"><input value={form.brand} onChange={(e) => set("brand", e.target.value)} /></Field>
-        <Field label="Model"><input value={form.model} onChange={(e) => set("model", e.target.value)} /></Field>
-        <Field label="Manufactured Year / Year Model">
-          <input
-            type="number"
-            value={form.yearModel}
-            onChange={(e) => set("yearModel", e.target.value)}
-            placeholder="e.g. 2024"
-            min="1990"
-            max="2100"
-          />
-        </Field>
-        <Field label="Serial Number">
-          <div className="field-inline">
-            <input value={form.serial} onChange={(e) => set("serial", e.target.value)} />
-            <button
-              type="button"
-              className="btn ghost sn-check-btn"
-              title="Copy the serial number and open the vendor's warranty lookup in a side window"
-              onClick={() => {
-                if (form.serial && navigator.clipboard?.writeText) {
-                  navigator.clipboard.writeText(form.serial).catch(() => {});
-                }
-                const w = 480, h = 760;
-                const left = (window.screenX || 0) + (window.outerWidth || w);
-                const top = window.screenY || 0;
-                window.open(warrantyLookupUrl(form.brand, form.serial), "snChecker", `width=${w},height=${h},left=${left},top=${top}`);
-              }}
-            >
-              <ExternalLink size={13} /> Check S/N
-            </button>
-          </div>
-        </Field>
-        <Field label="Status (required)">
-          <select value={form.status} onChange={(e) => set("status", e.target.value)} required>
-            <option value="">Select status</option>
-            {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </Field>
-        {needsReason && (
-          <div className="form-full">
-            <Field label="Reason for Repair">
-              <textarea
-                value={form.repairReason || ""}
-                onChange={(e) => set("repairReason", e.target.value)}
-                rows={2}
-                placeholder="What's wrong with it? This becomes the Maintenance entry."
-                autoFocus
-              />
-            </Field>
-          </div>
-        )}
-        <Field label="Condition">
-          <select value={form.condition} onChange={(e) => set("condition", e.target.value)}>
-            {CONDITION_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </Field>
-        <Field label="Location">
-          <select value={form.locationId} onChange={(e) => set("locationId", e.target.value)}>
-            <option value="">Select location</option>
-            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Assigned To">
-          <input value={form.assignedTo} onChange={(e) => onAssignedToChange(e.target.value)} />
-        </Field>
-        <Field label="Add Purchase Info?">
-          <select
-            value={hasPurchaseInfo ? "yes" : "no"}
-            onChange={(e) => {
-              const yes = e.target.value === "yes";
-              setHasPurchaseInfo(yes);
-              if (yes && !form.purchaseDate) set("purchaseDate", todayISO());
-            }}
+    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={820}>
+      <form onSubmit={submit}>
+        <FormSection icon={Package} title="Asset Information">
+          <Field label="Asset Name" required>
+            <input value={form.name} onChange={(e) => set("name", e.target.value)} autoFocus required />
+          </Field>
+          <Field
+            label="Asset Tag"
+            className="field-with-action"
+            action={!asset.id && <ToggleSwitch checked={autoTag} onChange={onAutoTagToggle} label="Auto Generate" />}
           >
-            <option value="no">No</option>
-            <option value="yes">Yes</option>
-          </select>
-        </Field>
-        {hasPurchaseInfo && (
-          <>
-            <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
-            <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
-          </>
-        )}
-        {form.assetType === "IT" ? (
-          <>
-            <Field label="Add Warranty Expiry?">
-              <select
-                value={hasWarrantyExpiry ? "yes" : "no"}
-                onChange={(e) => {
-                  const yes = e.target.value === "yes";
-                  setHasWarrantyExpiry(yes);
-                  if (yes && (!form.warrantyExpiry || form.warrantyExpiry === "N/A")) set("warrantyExpiry", todayISO());
-                }}
-              >
-                <option value="no">No / N.A</option>
-                <option value="yes">Yes</option>
-              </select>
-            </Field>
-            {hasWarrantyExpiry && (
-              <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
-            )}
-          </>
-        ) : (
-          <Field label="Requires Calibration?">
-            <select
-              value={form.requiresCalibration ? "yes" : "no"}
-              onChange={(e) => set("requiresCalibration", e.target.value === "yes")}
-            >
-              <option value="no">No</option>
-              <option value="yes">Yes</option>
+            <input
+              value={form.tag}
+              onChange={(e) => set("tag", e.target.value)}
+              disabled={autoTag}
+              placeholder={autoTag ? "Will be generated automatically (e.g. ASTUTE004)" : "e.g. ASTUTE004"}
+            />
+          </Field>
+          <Field label="Asset Type" required>
+            <select value={form.assetType} onChange={(e) => onAssetTypeChange(e.target.value)}>
+              <option value="IT">IT Asset</option>
+              <option value="Non-IT">Non-IT Asset</option>
             </select>
           </Field>
-        )}
-        {form.assetType === "Non-IT" && form.requiresCalibration && (
-          <>
-            <Field label="Calibration Date">
-              <input type="date" value={form.calibrationDate} onChange={(e) => set("calibrationDate", e.target.value)} />
-            </Field>
-            <Field label="Next Recalibration Date">
-              <input type="date" value={form.nextCalibrationDate} onChange={(e) => set("nextCalibrationDate", e.target.value)} />
-            </Field>
-          </>
-        )}
-        <div className="form-full">
-          <Field label="Notes">
-            <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} />
+          <Field label="Category" required>
+            <select value={form.categoryId} onChange={(e) => onCategoryChange(e.target.value)} required>
+              <option value="">Select category</option>
+              {categories.filter((c) => c.type === form.assetType).map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
           </Field>
+        </FormSection>
+
+        <FormSection icon={Tags} title="Device Details">
+          <Field label="Brand">
+            <SearchableSelect value={form.brand} onChange={(v) => set("brand", v)} options={brandOptions} placeholder="Search or type a brand" />
+          </Field>
+          <Field label="Model">
+            <input value={form.model} onChange={(e) => set("model", e.target.value)} />
+          </Field>
+          <Field label="Serial Number">
+            <div className="field-inline">
+              <input value={form.serial} onChange={(e) => set("serial", e.target.value)} />
+              <button
+                type="button"
+                className="btn ghost sn-check-btn"
+                title="Copy the serial number and open the vendor's warranty lookup in a side window"
+                onClick={() => {
+                  if (form.serial && navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(form.serial).catch(() => {});
+                  }
+                  const w = 480, h = 760;
+                  const left = (window.screenX || 0) + (window.outerWidth || w);
+                  const top = window.screenY || 0;
+                  window.open(warrantyLookupUrl(form.brand, form.serial), "snChecker", `width=${w},height=${h},left=${left},top=${top}`);
+                }}
+              >
+                <ExternalLink size={13} /> Verify
+              </button>
+            </div>
+          </Field>
+          <Field label="Manufactured Year">
+            <input
+              type="number"
+              value={form.yearModel}
+              onChange={(e) => set("yearModel", e.target.value)}
+              placeholder="e.g. 2024"
+              min="1990"
+              max="2100"
+            />
+          </Field>
+          <Field label="Status" required>
+            <StatusPicker value={form.status} onChange={(v) => set("status", v)} />
+          </Field>
+          <Field label="Condition">
+            <select value={form.condition} onChange={(e) => set("condition", e.target.value)}>
+              {CONDITION_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </Field>
+
+          {needsReason && (
+            <div className="form-full repair-reason-box">
+              <Field label="Reason for Repair">
+                <textarea
+                  value={form.repairReason || ""}
+                  onChange={(e) => set("repairReason", e.target.value)}
+                  rows={2}
+                  placeholder="What's wrong with it? This becomes the Maintenance entry."
+                />
+              </Field>
+            </div>
+          )}
+
+          {form.assetType === "Non-IT" && (
+            <div className="form-full">
+              <ToggleSwitch
+                checked={!!form.requiresCalibration}
+                onChange={(checked) => set("requiresCalibration", checked)}
+                label="Requires Calibration"
+              />
+            </div>
+          )}
+          {form.assetType === "Non-IT" && form.requiresCalibration && (
+            <>
+              <Field label="Calibration Date">
+                <input type="date" value={form.calibrationDate} onChange={(e) => set("calibrationDate", e.target.value)} />
+              </Field>
+              <Field label="Next Recalibration Date">
+                <input type="date" value={form.nextCalibrationDate} onChange={(e) => set("nextCalibrationDate", e.target.value)} />
+              </Field>
+            </>
+          )}
+        </FormSection>
+
+        <FormSection icon={User} title="Assignment">
+          <Field label="Department">
+            <SearchableSelect value={form.department || ""} onChange={(v) => set("department", v)} options={departmentSelectOptions} placeholder="Search or type a department" />
+          </Field>
+          <Field label="Assigned To">
+            <SearchableSelect value={form.assignedTo} onChange={onAssignedToChange} options={assignedToOptions} placeholder="Search or type a name" />
+          </Field>
+          <div className="form-full">
+            <Field label="Location">
+              <SearchableSelect value={form.locationId} onChange={(v) => set("locationId", v)} options={locationSelectOptions} placeholder="Search locations" allowCustom={false} />
+            </Field>
+          </div>
+        </FormSection>
+
+        <div className="form-section optional-section">
+          <button type="button" className="optional-section-toggle" onClick={() => setOptionalOpen((o) => !o)}>
+            <span className="form-section-head" style={{ marginBottom: 0 }}>
+              <span className="form-section-head-icon"><Info size={14} /></span>
+              <h4>Optional Information</h4>
+            </span>
+            {optionalOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </button>
+          {optionalOpen && (
+            <div className="section-grid optional-section-body">
+              <div className="form-full">
+                <ToggleSwitch checked={hasPurchaseInfo} onChange={(yes) => {
+                  setHasPurchaseInfo(yes);
+                  if (yes && !form.purchaseDate) set("purchaseDate", todayISO());
+                }} label="Add purchase info" />
+              </div>
+              {hasPurchaseInfo && (
+                <>
+                  <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
+                  <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
+                </>
+              )}
+              {form.assetType === "IT" && (
+                <div className="form-full">
+                  <ToggleSwitch checked={hasWarrantyExpiry} onChange={(yes) => {
+                    setHasWarrantyExpiry(yes);
+                    if (yes && (!form.warrantyExpiry || form.warrantyExpiry === "N/A")) set("warrantyExpiry", todayISO());
+                  }} label="Add warranty expiry" />
+                </div>
+              )}
+              {form.assetType === "IT" && hasWarrantyExpiry && (
+                <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
+              )}
+              <div className="form-full">
+                <Field label="Notes">
+                  <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} />
+                </Field>
+              </div>
+            </div>
+          )}
         </div>
-        <div className="form-full modal-actions">
+
+        <div className="modal-footer-sticky">
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" onClick={submit}>Save Asset</button>
+          <button type="submit" className="btn primary">{asset.id ? "Save Changes" : "Create Asset"}</button>
         </div>
-      </div>
+      </form>
     </Modal>
   );
 }
@@ -3163,6 +3379,55 @@ function GlobalStyles() {
       .field-inline input { flex: 1; min-width: 120px; }
       .sn-check-btn { white-space: nowrap; padding: 0 10px; font-size: 12px; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+      .field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .required-mark { color: var(--danger); margin-left: 2px; }
+
+      /* New Asset form — section cards */
+      .form-section { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
+      .form-section:last-of-type { margin-bottom: 0; }
+      .form-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+      .form-section-head-icon { width: 26px; height: 26px; border-radius: 7px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .form-section-head h4 { font-size: 13px; font-weight: 700; letter-spacing: 0.01em; }
+      .form-section-head-action { margin-left: auto; }
+      .section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+      .section-grid .form-full { grid-column: 1 / -1; }
+
+      /* Toggle switch */
+      .toggle-switch-wrap { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 11.5px; color: var(--text-soft); font-weight: 600; user-select: none; }
+      .toggle-switch { position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; }
+      .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+      .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 999px; transition: background 0.15s ease; }
+      .toggle-slider::before { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: #fff; border-radius: 999px; transition: transform 0.15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+      .toggle-switch input:checked + .toggle-slider { background: var(--accent); }
+      .toggle-switch input:checked + .toggle-slider::before { transform: translateX(14px); }
+
+      /* Status picker (colored badge dropdown) */
+      .status-picker { position: relative; }
+      .status-picker-trigger { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--bg); cursor: pointer; color: var(--text-soft); font-family: inherit; font-size: 13px; }
+      .status-picker-placeholder { color: var(--text-soft); }
+      .status-dot-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+      .status-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
+      .status-picker-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.16); padding: 6px; z-index: 20; }
+      .status-picker-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border-radius: 7px; border: none; background: none; cursor: pointer; font-family: inherit; font-size: 12.5px; color: var(--text); text-align: left; }
+      .status-picker-option:hover { background: var(--accent-soft); color: var(--accent); }
+
+      /* Searchable select */
+      .searchable-select { position: relative; }
+      .searchable-select input { width: 100%; }
+      .searchable-select-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 190px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.16); padding: 4px; z-index: 20; scrollbar-width: none; }
+      .searchable-select-menu::-webkit-scrollbar { display: none; }
+      .searchable-select-option { padding: 7px 9px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+      .searchable-select-option:hover { background: var(--accent-soft); color: var(--accent); }
+      .searchable-select-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-soft); cursor: pointer; padding: 2px; display: flex; }
+
+      /* Repair-reason callout + optional collapsible section */
+      .repair-reason-box { background: color-mix(in srgb, var(--danger) 6%, var(--bg)); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border)); border-radius: 10px; padding: 12px 14px; }
+      .optional-section-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; cursor: pointer; padding: 0; color: var(--text-soft); font-family: inherit; }
+      .optional-section-toggle:hover .form-section-head h4 { color: var(--accent); }
+      .optional-section-body { margin-top: 14px; }
+
+      /* Sticky footer for the New/Edit Asset form */
+      .modal-footer-sticky { position: sticky; bottom: 0; margin: 20px -20px -20px; padding: 14px 20px; background: var(--surface); border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; border-radius: 0 0 14px 14px; }
       .sort-th-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; padding: 0; font: inherit; font-weight: inherit; color: inherit; cursor: pointer; }
       .sort-th-idle { opacity: 0.35; }
       .name-subtext { font-size: 11.5px; color: var(--text-soft); font-weight: 400; margin-top: 2px; }
@@ -3207,6 +3472,9 @@ function GlobalStyles() {
         .metric-value { font-size: 21px; }
         .charts-row { grid-template-columns: 1fr; }
         .form-grid { grid-template-columns: 1fr; }
+        .section-grid { grid-template-columns: 1fr; }
+        .form-section { padding: 14px; }
+        .modal-footer-sticky { border-radius: 0; }
         .detail-grid { grid-template-columns: 1fr; }
         .search-box { width: 100%; }
         .view-head { flex-direction: column; align-items: stretch; }
