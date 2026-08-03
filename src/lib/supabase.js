@@ -99,12 +99,16 @@ const TABLES = {
     toRow: (c) => ({
       id: c.id, asset_id: c.assetId || null, at: c.at,
       author_id: c.authorId || null, author_name: c.authorName || null,
-      message: c.message || null, target_user_id: c.targetUserId || null, read: !!c.read,
+      message: c.message || null,
+      target_user_ids: c.targetUserIds || [],
+      read_by: c.readBy || [],
     }),
     fromRow: (r) => ({
       id: r.id, assetId: r.asset_id, at: r.at,
       authorId: r.author_id, authorName: r.author_name,
-      message: r.message, targetUserId: r.target_user_id, read: r.read,
+      message: r.message,
+      targetUserIds: r.target_user_ids || [],
+      readBy: r.read_by || [],
     }),
   },
 };

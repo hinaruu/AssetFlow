@@ -682,7 +682,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   const alerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
   const myComments = useMemo(
-    () => (data.comments || []).filter((c) => c.targetUserId === currentUser.id && !c.read)
+    () => (data.comments || []).filter((c) => (c.targetUserIds || []).includes(currentUser.id) && !(c.readBy || []).includes(currentUser.id))
       .sort((a, b) => new Date(b.at) - new Date(a.at)),
     [data.comments, currentUser.id]
   );
@@ -692,7 +692,9 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
     if (!persist) return;
     persist({
       ...data,
-      comments: (data.comments || []).map((c) => (c.id === commentId ? { ...c, read: true } : c)),
+      comments: (data.comments || []).map((c) =>
+        c.id === commentId ? { ...c, readBy: [...(c.readBy || []), currentUser.id] } : c
+      ),
     });
   };
 
@@ -1090,16 +1092,18 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast(`${selected.length} asset(s) deleted.`);
   };
 
-  // Posts a comment on an asset. If the asset is assigned to someone with a
-  // login account (matched by name), it's flagged unread for them so it
-  // shows up in their notification bell.
+  // Posts a comment on an asset. Notifies the Regional Staff user(s) for
+  // that asset's location/country (not whoever it's assigned to) — so it
+  // shows up in their notification bell until each of them reads it.
   const addComment = (assetId, message) => {
     const text = (message || "").trim();
     if (!text) return;
     const asset = data.assets.find((a) => a.id === assetId);
-    const target = asset?.assignedTo
-      ? data.users.find((u) => u.name.toLowerCase() === asset.assignedTo.toLowerCase() && u.id !== currentUser.id)
-      : null;
+    const targetUserIds = asset?.locationId
+      ? data.users
+          .filter((u) => u.role !== "Admin" && u.locationId === asset.locationId && u.id !== currentUser.id)
+          .map((u) => u.id)
+      : [];
     const comment = {
       id: uid("cmt"),
       assetId,
@@ -1107,8 +1111,8 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       authorId: currentUser.id,
       authorName: currentUser.name,
       message: text,
-      targetUserId: target?.id || null,
-      read: false,
+      targetUserIds,
+      readBy: [],
     };
     const next = withLog({
       ...data,
@@ -1839,7 +1843,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
             value={commentText}
             onChange={(e) => setCommentText(e.target.value)}
             rows={2}
-            placeholder={asset.assignedTo ? `Message ${asset.assignedTo} about this asset…` : "Add a comment…"}
+            placeholder={loc?.name ? `Message the ${loc.name} team about this asset…` : "Add a comment…"}
           />
           <button type="button" className="btn primary" onClick={submitComment} disabled={!commentText.trim()}>
             Send
