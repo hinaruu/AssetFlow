@@ -804,6 +804,11 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
                 {myComments.length === 0 && <div className="notif-empty">No new comments.</div>}
                 {myComments.map((c) => {
                   const asset = data.assets.find((a) => a.id === c.assetId);
+                  // If I already have an earlier comment in this same thread,
+                  // this new one is a reply to me specifically.
+                  const isReplyToMe = (data.comments || []).some(
+                    (other) => other.assetId === c.assetId && other.authorId === currentUser.id && new Date(other.at) < new Date(c.at)
+                  );
                   return (
                     <button
                       key={c.id}
@@ -812,7 +817,9 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
                       onClick={() => openComment(c)}
                       title="View asset"
                     >
-                      {c.authorName} commented on Asset #{asset?.tag || "—"}
+                      {isReplyToMe
+                        ? <>{c.authorName} replied to your comment on Asset #{asset?.tag || "—"}</>
+                        : <>{c.authorName} commented on Asset #{asset?.tag || "—"}</>}
                     </button>
                   );
                 })}
@@ -1269,16 +1276,27 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast(`${selected.length} asset(s) deleted.`);
   };
 
-  // Posts a comment on an asset. Notifies the specific registered account
-  // that originally added the asset (not whoever it's assigned to) — so it
-  // shows up in their notification bell until they read it.
+  // Posts a comment on an asset. Notifies the account that originally added
+  // the asset, every user account assigned to manage that asset's
+  // location/country (e.g. Eve Yew for Singapore), and anyone who has
+  // already commented in this asset's thread (so a reply reaches whoever
+  // it's replying to, admin included) — since those are the only people
+  // with app access who should hear about it. The "Assigned To" field is
+  // just free text for an employee with no app account, so it's never
+  // notified.
   const addComment = (assetId, message) => {
     const text = (message || "").trim();
     if (!text) return;
     const asset = data.assets.find((a) => a.id === assetId);
-    const targetUserIds = asset?.createdById && asset.createdById !== currentUser.id
-      ? [asset.createdById]
-      : [];
+    const locationUserIds = data.users
+      .filter((u) => u.locationId && u.locationId === asset?.locationId)
+      .map((u) => u.id);
+    const priorParticipantIds = (data.comments || [])
+      .filter((c) => c.assetId === assetId)
+      .map((c) => c.authorId);
+    const targetUserIds = Array.from(new Set(
+      [asset?.createdById, ...locationUserIds, ...priorParticipantIds].filter((id) => id && id !== currentUser.id)
+    ));
     const comment = {
       id: uid("cmt"),
       assetId,
