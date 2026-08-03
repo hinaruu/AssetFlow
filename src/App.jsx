@@ -1493,7 +1493,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           assignedTo: row.assignedTo || "",
           purchaseDate: row.purchaseDate || todayISO(),
           purchaseCost: Number(row.purchaseCost) || 0,
-          warrantyExpiry: row.warrantyExpiry || "",
+          warrantyExpiry: (row.warrantyExpiry && row.warrantyExpiry !== "N/A") ? row.warrantyExpiry : "",
           requiresCalibration: String(row.requiresCalibration || "").toLowerCase() === "yes",
           calibrationDate: row.calibrationDate || "",
           nextCalibrationDate: row.nextCalibrationDate || "",
@@ -1907,6 +1907,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
   const [form, setForm] = useState(asset);
   const [hasPurchaseInfo, setHasPurchaseInfo] = useState(!!(asset.purchaseDate || asset.purchaseCost));
   const [hasWarrantyExpiry, setHasWarrantyExpiry] = useState(!!(asset.warrantyExpiry && asset.warrantyExpiry !== "N/A"));
+  // ^ still checks for legacy "N/A" values from before this fix, so old assets open with the toggle correctly off
   // "New Asset" starts with the tag auto-generated (blank tag → server
   // assigns the next ASTUTE### on save). Editing an asset always shows its
   // real tag — auto-generate only applies at creation time.
@@ -2009,7 +2010,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
       ...form,
       purchaseDate: hasPurchaseInfo ? form.purchaseDate : "",
       purchaseCost: hasPurchaseInfo ? form.purchaseCost : "",
-      warrantyExpiry: form.assetType === "IT" ? (hasWarrantyExpiry ? form.warrantyExpiry : "N/A") : form.warrantyExpiry,
+      warrantyExpiry: form.assetType === "IT" ? (hasWarrantyExpiry ? form.warrantyExpiry : "") : form.warrantyExpiry,
     });
   };
 
@@ -2170,6 +2171,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
                   <ToggleSwitch checked={hasWarrantyExpiry} onChange={(yes) => {
                     setHasWarrantyExpiry(yes);
                     if (yes && (!form.warrantyExpiry || form.warrantyExpiry === "N/A")) set("warrantyExpiry", todayISO());
+                    if (!yes) set("warrantyExpiry", "");
                   }} label="Add warranty expiry" />
                 </div>
               )}

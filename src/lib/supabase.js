@@ -61,7 +61,7 @@ const TABLES = {
       status: a.status || null, condition: a.condition || null,
       location_id: a.locationId || null, assigned_to: a.assignedTo || null,
       purchase_date: a.purchaseDate || null, purchase_cost: num(a.purchaseCost),
-      warranty_expiry: a.warrantyExpiry || null,
+      warranty_expiry: (a.warrantyExpiry && a.warrantyExpiry !== "N/A") ? a.warrantyExpiry : null,
       requires_calibration: !!a.requiresCalibration,
       calibration_date: a.calibrationDate || null,
       next_calibration_date: a.nextCalibrationDate || null,
