@@ -765,9 +765,17 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   const alerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
   const myComments = useMemo(
-    () => (data.comments || []).filter((c) => (c.targetUserIds || []).includes(currentUser.id) && !(c.readBy || []).includes(currentUser.id))
-      .sort((a, b) => new Date(b.at) - new Date(a.at)),
-    [data.comments, currentUser.id]
+    () => (data.comments || []).filter((c) => {
+      if (!(c.targetUserIds || []).includes(currentUser.id) || (c.readBy || []).includes(currentUser.id)) return false;
+      // Live access check: even if targetUserIds was set at comment time,
+      // an asset that has since been transferred away from this user's
+      // location should no longer surface a notification for it (admins
+      // always retain access).
+      if (isAdmin) return true;
+      const asset = data.assets.find((a) => a.id === c.assetId);
+      return !!asset && asset.locationId === scopedLocationId;
+    }).sort((a, b) => new Date(b.at) - new Date(a.at)),
+    [data.comments, data.assets, currentUser.id, isAdmin, scopedLocationId]
   );
   const notifCount = alerts.length + myComments.length;
 
@@ -1077,9 +1085,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   useEffect(() => {
     if (!focusAssetId) return;
     const a = data.assets.find((x) => x.id === focusAssetId);
-    if (a) setViewing(a);
+    // Only open the asset if the current user still has access to it —
+    // an asset transferred to a different location shouldn't be openable
+    // via a stale notification link either.
+    if (a && (isAdmin || a.locationId === scopedLocationId)) setViewing(a);
     if (onFocusHandled) onFocusHandled();
-  }, [focusAssetId, data.assets, onFocusHandled]);
+  }, [focusAssetId, data.assets, onFocusHandled, isAdmin, scopedLocationId]);
 
   // Assets with an unread comment for the current user — shown as a small
   // indicator in the table so the person who added an asset notices right
@@ -1230,7 +1241,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   );
 
   const save = async (asset) => {
-    const { repairReason, ...assetFields } = asset;
+    const { repairReason, _lockLocationField, ...assetFields } = asset;
     let next;
     let autoMaint = null;
     if (assetFields.id) {
@@ -1307,26 +1318,37 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   // many assets at once is easy to trigger by accident.
   const bulkDelete = () => setBulkDeleteConfirmOpen(true);
 
-  // Posts a comment on an asset. Notifies the account that originally added
-  // the asset, every user account assigned to manage that asset's
-  // location/country (e.g. Eve Yew for Singapore), and anyone who has
-  // already commented in this asset's thread (so a reply reaches whoever
-  // it's replying to, admin included) — since those are the only people
-  // with app access who should hear about it. The "Assigned To" field is
-  // just free text for an employee with no app account, so it's never
-  // notified.
+  // Posts a comment on an asset. Notifies every user account currently
+  // assigned to manage that asset's location/country (e.g. Eve Yew for
+  // Singapore) plus admins, and anyone who has already commented in this
+  // asset's thread AND still has access to the asset's current location
+  // (so a reply reaches whoever it's replying to) — since those are the
+  // only people with app access who should hear about it. The "Assigned
+  // To" field is just free text for an employee with no app account, so
+  // it's never notified.
+  //
+  // Deliberately does NOT unconditionally include the asset's original
+  // creator or every past commenter: once an asset is transferred to a
+  // different location, whoever isn't an admin or currently assigned to
+  // the new location should stop hearing about it.
   const addComment = (assetId, message) => {
     const text = (message || "").trim();
     if (!text) return;
     const asset = data.assets.find((a) => a.id === assetId);
+    const hasCurrentAccess = (userId) => {
+      const u = data.users.find((x) => x.id === userId);
+      return !!u && (u.role === "Admin" || (u.locationId && u.locationId === asset?.locationId));
+    };
     const locationUserIds = data.users
       .filter((u) => u.locationId && u.locationId === asset?.locationId)
       .map((u) => u.id);
     const priorParticipantIds = (data.comments || [])
       .filter((c) => c.assetId === assetId)
-      .map((c) => c.authorId);
+      .map((c) => c.authorId)
+      .filter(hasCurrentAccess);
+    const createdById = hasCurrentAccess(asset?.createdById) ? asset?.createdById : null;
     const targetUserIds = Array.from(new Set(
-      [asset?.createdById, ...locationUserIds, ...priorParticipantIds].filter((id) => id && id !== currentUser.id)
+      [createdById, ...locationUserIds, ...priorParticipantIds].filter((id) => id && id !== currentUser.id)
     ));
     const comment = {
       id: uid("cmt"),
@@ -1355,6 +1377,11 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       assignedTo: "",
       status: "In Stock",
       transferHistory: [],
+      // Non-admins can't relocate a duplicated asset — it always starts
+      // in their own assigned location, and the field is locked in the
+      // modal below. Admins keep full control over the location.
+      locationId: !isAdmin && scopedLocationId ? scopedLocationId : asset.locationId,
+      _lockLocationField: !isAdmin,
     });
   };
 
@@ -1838,7 +1865,7 @@ function StatusPicker({ value, onChange, placeholder = "Select status" }) {
 // options as you type. With allowCustom (Department / Assigned To / Brand)
 // the typed text itself is the value, and picking a suggestion just fills
 // it in. Without it (Location) the value must be one of the option ids.
-function SearchableSelect({ value, onChange, options, placeholder = "Search…", allowCustom = true }) {
+function SearchableSelect({ value, onChange, options, placeholder = "Search…", allowCustom = true, disabled = false }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef(null);
@@ -1882,15 +1909,16 @@ function SearchableSelect({ value, onChange, options, placeholder = "Search…",
           setOpen(true);
           if (allowCustom) onChange(e.target.value);
         }}
-        onFocus={() => { setOpen(true); setQuery(selectedLabel); }}
+        onFocus={() => { if (disabled) return; setOpen(true); setQuery(selectedLabel); }}
         placeholder={placeholder}
+        disabled={disabled}
       />
-      {!allowCustom && value && (
+      {!allowCustom && value && !disabled && (
         <button type="button" className="searchable-select-clear" title="Clear" onMouseDown={(e) => { e.preventDefault(); onChange(""); setQuery(""); }}>
           <X size={12} />
         </button>
       )}
-      {open && filtered.length > 0 && (
+      {!disabled && open && filtered.length > 0 && (
         <div className="searchable-select-menu">
           {filtered.map((o) => (
             <div key={o.value} className="searchable-select-option" onMouseDown={() => pick(o)}>
@@ -2139,7 +2167,17 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
           </Field>
           <div className="form-full">
             <Field label="Location">
-              <SearchableSelect value={form.locationId} onChange={(v) => set("locationId", v)} options={locationSelectOptions} placeholder="Search locations" allowCustom={false} />
+              <SearchableSelect
+                value={form.locationId}
+                onChange={(v) => set("locationId", v)}
+                options={locationSelectOptions}
+                placeholder="Search locations"
+                allowCustom={false}
+                disabled={!!asset._lockLocationField}
+              />
+              {!!asset._lockLocationField && (
+                <span className="field-hint">Duplicated assets keep your assigned location.</span>
+              )}
             </Field>
           </div>
         </FormSection>
@@ -2219,9 +2257,22 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
       <span className="detail-value">{value || "—"}</span>
     </div>
   );
+  // Lightweight section wrapper — reuses the same header style as the New
+  // Asset window's FormSection, but keeps the two-column detail-grid body
+  // (rather than FormSection's input-oriented section-grid) since this is
+  // a read-only label/value layout, not a form.
+  const detailSection = (Icon, title, content) => (
+    <div className="form-section detail-section">
+      <div className="form-section-head">
+        <span className="form-section-head-icon"><Icon size={14} /></span>
+        <h4>{title}</h4>
+      </div>
+      <div className="detail-grid">{content}</div>
+    </div>
+  );
   return (
     <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={760}>
-      <div className="detail-grid">
+      {detailSection(Package, "Asset Information", <>
         {row("Name", asset.name)}
         {row("Department", asset.department)}
         {row("Category", cat && (
@@ -2231,21 +2282,30 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
           </span>
         ))}
         {row("Asset Type", asset.assetType)}
+      </>)}
+
+      {detailSection(Tags, "Device Details", <>
         {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
         {row("Manufactured Year / Year Model", asset.yearModel)}
         {row("Serial Number", asset.serial)}
         {row("Status", <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>)}
         {row("Condition", asset.condition)}
-        {row("Location", loc?.name)}
-        {row("Assigned To", asset.assignedTo)}
-        {row("Added By", asset.createdByName)}
-        {row("Purchase Date", asset.purchaseDate)}
-        {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
-        {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
         {asset.assetType === "Non-IT" && row("Requires Calibration?", asset.requiresCalibration ? "Yes" : "No")}
         {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Calibration Date", asset.calibrationDate)}
         {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Next Recalibration Date", asset.nextCalibrationDate)}
-      </div>
+      </>)}
+
+      {detailSection(User, "Assignment", <>
+        {row("Location", loc?.name)}
+        {row("Assigned To", asset.assignedTo)}
+        {row("Added By", asset.createdByName)}
+      </>)}
+
+      {detailSection(Info, "Purchase & Warranty", <>
+        {row("Purchase Date", asset.purchaseDate)}
+        {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
+        {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
+      </>)}
 
       <div className="detail-full">
         <div className="notif-section-title" style={{ marginTop: 14 }}>Notes</div>
@@ -2293,7 +2353,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
           <div className="notif-section-title">Transfer History</div>
           {asset.transferHistory.map((t) => (
             <div key={t.id} className="notif-item">
-              {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleDateString()})
+              {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })})
             </div>
           ))}
         </div>
@@ -3377,6 +3437,7 @@ function GlobalStyles() {
         background: var(--bg); color: var(--text); font-family: inherit;
       }
       .field input:disabled, .field select:disabled, .field textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+      .field-hint { display: block; margin-top: 5px; font-size: 11.5px; color: var(--text-soft); }
       .field-inline { display: flex; gap: 6px; flex-wrap: wrap; }
       .field-inline input { flex: 1; min-width: 120px; }
       .sn-check-btn { white-space: nowrap; padding: 0 10px; font-size: 12px; }
