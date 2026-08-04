@@ -1329,6 +1329,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [locationFilter, setLocationFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [userFilter, setUserFilter] = useState("all");
+  const [presetFilter, setPresetFilter] = useState("all"); // one-tap shortcuts: under repair / needs attention / pending approval
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
 
@@ -1455,8 +1456,35 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
   }, [categoryOptions, categoryFilter]);
 
+  // Quick-filter presets — one-tap shortcuts for the views managers check
+  // most often, built from data already computed above (status + the same
+  // alert map the table's warning icons use) rather than new tracking.
+  const presetOptions = useMemo(() => {
+    const underRepairCount = scopedAssetsBase.filter((a) => a.status === "Under Repair").length;
+    const needsAttentionCount = scopedAssetsBase.filter((a) => assetAlertMap.has(a.id)).length;
+    const pendingApprovalCount = scopedAssetsBase.filter((a) => !!a.pendingDeletion).length;
+    return [
+      { id: "all", label: "All assets", color: null },
+      { id: "underRepair", label: "Under repair", count: underRepairCount, color: STATUS_COLORS["Under Repair"] },
+      { id: "needsAttention", label: "Needs attention", count: needsAttentionCount, color: "#EF4444" },
+      ...(isAdmin ? [{ id: "pendingApproval", label: "Pending approval", count: pendingApprovalCount, color: "#8B5CF6" }] : []),
+    ].filter((p) => p.id === "all" || p.count > 0 || presetFilter === p.id);
+  }, [scopedAssetsBase, assetAlertMap, isAdmin, presetFilter]);
+
+  // If the active preset's items all get resolved (e.g. every repair is
+  // closed out) and the chip disappears, fall back to "all" instead of
+  // silently showing an empty table.
+  useEffect(() => {
+    if (presetFilter !== "all" && !presetOptions.some((p) => p.id === presetFilter)) {
+      setPresetFilter("all");
+    }
+  }, [presetOptions, presetFilter]);
+
   const visibleAssets = useMemo(() => {
     let list = scopedAssetsBase;
+    if (presetFilter === "underRepair") list = list.filter((a) => a.status === "Under Repair");
+    else if (presetFilter === "needsAttention") list = list.filter((a) => assetAlertMap.has(a.id));
+    else if (presetFilter === "pendingApproval") list = list.filter((a) => !!a.pendingDeletion);
     if (locationFilter !== "all") list = list.filter((a) => a.locationId === locationFilter);
     if (categoryFilter !== "all") list = list.filter((a) => a.categoryId === categoryFilter);
     if (userFilter !== "all") list = list.filter((a) => a.assignedTo === userFilter);
@@ -1473,7 +1501,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       });
     }
     return list;
-  }, [scopedAssetsBase, data.locations, data.categories, search, locationFilter, categoryFilter, userFilter]);
+  }, [scopedAssetsBase, data.locations, data.categories, search, locationFilter, categoryFilter, userFilter, presetFilter, assetAlertMap]);
 
   const sortedAssets = useMemo(() => {
     if (!sort.key) return visibleAssets;
@@ -1888,6 +1916,23 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
 
   return (
     <div>
+      <div className="preset-filters">
+        {presetOptions.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className={`preset-chip${!p.color ? " preset-chip-all" : ""}${presetFilter === p.id ? " active" : ""}`}
+            style={p.color ? {
+              background: presetFilter === p.id ? p.color : `${p.color}1a`,
+              color: presetFilter === p.id ? "#fff" : p.color,
+              borderColor: presetFilter === p.id ? p.color : `${p.color}40`,
+            } : undefined}
+            onClick={() => setPresetFilter(p.id)}
+          >
+            {p.label}{typeof p.count === "number" && ` · ${p.count}`}
+          </button>
+        ))}
+      </div>
       <div className="view-head">
         <div className="search-box">
           <Search size={15} />
@@ -4012,6 +4057,9 @@ function GlobalStyles() {
       .view-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
       .view-title { font-size: 18px; }
       .view-actions { display: flex; gap: 8px; }
+      .preset-filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .preset-chip { display: inline-flex; align-items: center; font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-soft); cursor: pointer; font-family: inherit; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
+      .preset-chip-all.active { background: var(--accent); border-color: var(--accent); color: #fff; }
       .search-box { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; width: 280px; color: var(--text-soft); }
       .search-box input { border: none; outline: none; background: none; color: var(--text); font-size: 13px; width: 100%; }
       .sort-select { border: 1px solid var(--border); border-radius: 9px; padding: 8px 12px; font-size: 13px; background: var(--surface); color: var(--text); }
