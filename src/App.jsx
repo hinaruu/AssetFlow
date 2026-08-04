@@ -1092,20 +1092,14 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
         <Metric label="Under Repair" value={totals.underRepair} sub={`${pct(totals.underRepair)}% of all assets`} icon={Wrench} color={STATUS_COLORS["Under Repair"]} />
       </div>
 
-      <div className={`charts-row ${isAdmin ? "charts-row-3" : ""}`}>
+      <div className={`charts-row ${isAdmin ? "charts-row-4" : "charts-row-3"}`}>
         <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} total={assets.length} />
         <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} total={assets.length} />
-        {isAdmin && (
-          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} total={data.assets.length} />
-        )}
-      </div>
-
-      <div className="bottom-row">
-        <div className="panel health-panel">
+        <div className="panel chart-card health-panel">
           <div className="panel-head"><h3>Asset Health</h3></div>
           <div className="health-body">
             <div className="health-ring-wrap">
-              <ResponsiveContainer width={132} height={132}>
+              <ResponsiveContainer width={110} height={110}>
                 <PieChart>
                   <Pie
                     data={[
@@ -1113,7 +1107,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
                       { name: "Needs Attention", value: health.attention },
                       { name: "Critical", value: health.critical },
                     ].filter((d) => d.value > 0)}
-                    dataKey="value" nameKey="name" innerRadius={46} outerRadius={62} startAngle={90} endAngle={-270} paddingAngle={health.healthy && (health.attention || health.critical) ? 3 : 0}
+                    dataKey="value" nameKey="name" innerRadius={38} outerRadius={52} startAngle={90} endAngle={-270} paddingAngle={health.healthy && (health.attention || health.critical) ? 3 : 0}
                   >
                     <Cell fill="#10B981" />
                     <Cell fill="#F59E0B" />
@@ -1133,7 +1127,12 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
             </ul>
           </div>
         </div>
+        {isAdmin && (
+          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} total={data.assets.length} />
+        )}
+      </div>
 
+      <div className="bottom-row bottom-row-2">
         <div className="panel">
           <div className="panel-head"><h3>Warranty Overview</h3></div>
           <div className="warranty-stats">
@@ -1287,9 +1286,9 @@ function DonutCard({ title, data, palette, total }) {
         <div className="empty-chart">No data to display</div>
       ) : (
         <div className="donut-body">
-          <ResponsiveContainer width={150} height={150}>
+          <ResponsiveContainer width={120} height={120}>
             <PieChart>
-              <Pie data={data} dataKey="value" nameKey="name" innerRadius={44} outerRadius={62} paddingAngle={2}>
+              <Pie data={data} dataKey="value" nameKey="name" innerRadius={36} outerRadius={52} paddingAngle={2}>
                 {data.map((entry, i) => (
                   <Cell key={entry.name} fill={colors(entry.name, i)} />
                 ))}
@@ -3898,8 +3897,9 @@ function GlobalStyles() {
 
       .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
       .charts-row-3 { grid-template-columns: repeat(3, 1fr); }
+      .charts-row-4 { grid-template-columns: repeat(4, 1fr); }
       .chart-card { min-height: 230px; }
-      .charts-row-3 .chart-card { min-height: 210px; padding-bottom: 4px; }
+      .charts-row-3 .chart-card, .charts-row-4 .chart-card { min-height: 210px; padding-bottom: 4px; }
       .empty-chart { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--text-soft); font-size: 13px; }
       .donut-body { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 6px 18px 16px; }
 
@@ -3911,7 +3911,7 @@ function GlobalStyles() {
       .panel-link { background: none; border: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; padding: 0; }
       .panel-link:hover { text-decoration: underline; }
 
-      .legend-scroll-wrap { position: relative; flex: 0 1 240px; min-width: 0; max-width: 240px; }
+      .legend-scroll-wrap { position: relative; flex: 0 1 190px; min-width: 0; max-width: 190px; }
       .legend-list {
         list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0;
         max-height: 132px; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none;
@@ -3932,11 +3932,12 @@ function GlobalStyles() {
       @keyframes legendBob { 0%, 100% { opacity: 0.6; transform: translate(-50%, 0); } 50% { opacity: 1; transform: translate(-50%, 2px); } }
 
       .bottom-row { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 14px; align-items: start; }
-      .health-body { display: flex; align-items: center; gap: 16px; padding: 10px 18px 20px; }
-      .health-ring-wrap { position: relative; width: 132px; height: 132px; flex-shrink: 0; }
+      .bottom-row-2 { grid-template-columns: 1.1fr 1fr; }
+      .health-body { display: flex; align-items: center; gap: 12px; padding: 8px 14px 16px; }
+      .health-ring-wrap { position: relative; width: 110px; height: 110px; flex-shrink: 0; }
       .health-ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-      .health-ring-pct { font-size: 22px; font-weight: 700; font-family: 'Poppins', sans-serif; color: #10B981; }
-      .health-ring-label { font-size: 10.5px; color: var(--text-soft); }
+      .health-ring-pct { font-size: 19px; font-weight: 700; font-family: 'Poppins', sans-serif; color: #10B981; }
+      .health-ring-label { font-size: 10px; color: var(--text-soft); }
 
       .warranty-stats { display: flex; padding: 8px 12px 18px; }
       .warranty-stat { flex: 1; text-align: center; padding: 8px; }
@@ -4097,6 +4098,7 @@ function GlobalStyles() {
 
       @media (max-width: 1100px) {
         .charts-row-3 { grid-template-columns: 1fr 1fr; }
+        .charts-row-4 { grid-template-columns: 1fr 1fr; }
         .bottom-row { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 860px) {
