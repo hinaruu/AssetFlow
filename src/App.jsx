@@ -1455,6 +1455,29 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast(autoMaint ? "Asset saved — added to Maintenance." : "Asset saved.");
   };
 
+  // Quick status change straight from the table row, without opening the
+  // full Edit form — mirrors the same Under-Repair / Retired-Disposed
+  // side-effects that a full edit would apply.
+  const quickStatusChange = async (asset, newStatus) => {
+    if (newStatus === asset.status) return;
+    let finalAsset = { ...asset, status: newStatus };
+    let autoMaint = null;
+    if (newStatus === "Under Repair" && asset.status !== "Under Repair") {
+      finalAsset.preRepairStatus = asset.status;
+      autoMaint = { id: uid("maint"), assetId: asset.id, description: "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+    } else if (newStatus !== "Under Repair" && asset.status === "Under Repair") {
+      finalAsset.preRepairStatus = null;
+    }
+    finalAsset = applyRetiredDefaults(finalAsset);
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
+      maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${newStatus}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`, finalAsset.locationId);
+    persist(next);
+    showToast(autoMaint ? "Status updated — added to Maintenance." : "Status updated.");
+  };
+
   const remove = async (id) => {
     const asset = data.assets.find((a) => a.id === id);
     const removedLogs = data.maintenance.filter((m) => m.assetId === id).length;
@@ -1783,11 +1806,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                 <SortTh label="Assigned User" sortKey="assignedTo" />
                 <SortTh label="Status" sortKey="status" />
                 <SortTh label="Condition" sortKey="condition" />
+                <th style={{ width: 132 }}></th>
               </tr>
             </thead>
             <tbody>
               {visibleAssets.length === 0 && (
-                <tr><td colSpan={isAdmin ? 8 : 7} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
+                <tr><td colSpan={isAdmin ? 9 : 8} className="empty-cell">No assets yet — click "New Asset" to add one.</td></tr>
               )}
               {sortedAssets.map((a) => {
                 const cat = data.categories.find((c) => c.id === a.categoryId);
@@ -1811,7 +1835,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                       {cat?.name || "—"}
                     </td>
                     <td data-label="Asset Tag">
-                      <span className="link-tag" title="View details — edit, duplicate, transfer, delete">{a.tag}</span>
+                      <span className="link-tag" title="View details, history & comments">{a.tag}</span>
                       {unreadCommentAssetIds.has(a.id) && (
                         <MessageCircle size={13} className="comment-flag" title="New comment on this asset" />
                       )}
@@ -1822,8 +1846,16 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                     </td>
                     <td data-label="Location">{loc?.name || "—"}</td>
                     <td data-label="Assigned User">{a.assignedTo || "—"}</td>
-                    <td data-label="Status">
-                      <Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge>
+                    <td data-label="Status" onClick={(e) => e.stopPropagation()}>
+                      <select
+                        className="status-select"
+                        value={a.status}
+                        onChange={(e) => quickStatusChange(a, e.target.value)}
+                        style={{ color: STATUS_COLORS[a.status], borderColor: `${STATUS_COLORS[a.status]}55` }}
+                        title="Quick-change status"
+                      >
+                        {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
                       {a.pendingDeletion && (
                         <div style={{ marginTop: 4 }}>
                           <Badge color="#EF4444">Pending Deletion</Badge>
@@ -1831,6 +1863,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                       )}
                     </td>
                     <td data-label="Condition">{a.condition}</td>
+                    <td className="actions-cell" onClick={(e) => e.stopPropagation()}>
+                      <div className="row-actions">
+                        <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(a)} />
+                        <IconBtn icon={Copy} title="Duplicate" onClick={() => duplicateAsset(a)} />
+                        <IconBtn icon={Truck} title="Transfer" onClick={() => startTransfer(a)} />
+                      </div>
+                    </td>
                   </tr>
                 );
               })}
@@ -1904,9 +1943,6 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           currentUser={currentUser}
           onAddComment={(message) => addComment(viewing.id, message)}
           onClose={() => setViewing(null)}
-          onEdit={() => { setEditing(viewing); setViewing(null); }}
-          onDuplicate={() => { duplicateAsset(viewing); setViewing(null); }}
-          onTransfer={() => { startTransfer(viewing); setViewing(null); }}
           onDelete={() => { setViewing(null); startDelete(viewing); }}
         />
       )}
@@ -2421,7 +2457,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, isAdmin, comments, maintenance, currentUser, onAddComment, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, comments, maintenance, currentUser, onAddComment, onClose, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const [commentText, setCommentText] = useState("");
@@ -2575,12 +2611,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, mai
         >
           <Trash2 size={14} /> Delete
         </button>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button type="button" className="btn ghost" onClick={onDuplicate}><Copy size={14} /> Duplicate</button>
-          <button type="button" className="btn ghost" onClick={onTransfer}><Truck size={14} /> Transfer</button>
-          <button type="button" className="btn ghost" onClick={onClose}>Close</button>
-          <button type="button" className="btn primary" onClick={onEdit}><Pencil size={14} /> Edit</button>
-        </div>
+        <button type="button" className="btn ghost" onClick={onClose}>Close</button>
       </div>
     </Modal>
   );
