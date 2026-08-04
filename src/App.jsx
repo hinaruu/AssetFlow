@@ -2698,127 +2698,143 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, mai
       <span className="detail-value">{value || "—"}</span>
     </div>
   );
-  // Lightweight section wrapper — reuses the same header style as the New
-  // Asset window's FormSection, but keeps the two-column detail-grid body
-  // (rather than FormSection's input-oriented section-grid) since this is
-  // a read-only label/value layout, not a form.
-  const detailSection = (Icon, title, content) => (
-    <div className="form-section detail-section">
-      <div className="form-section-head">
-        <span className="form-section-head-icon"><Icon size={14} /></span>
-        <h4>{title}</h4>
-      </div>
+  // Compact group — a slim uppercase caption plus a tight 2-col grid of
+  // label/value rows. Several of these stack inside one continuous card
+  // (separated by a hairline, not a full boxed section each) so the
+  // overview reads as one dense spec sheet instead of four separate cards.
+  const detailGroup = (Icon, title, content) => (
+    <div className="detail-group">
+      <div className="detail-group-label"><Icon size={12} /> {title}</div>
       <div className="detail-grid">{content}</div>
     </div>
   );
+  // Right-rail sections (Notes / History / Comments) share the same slim
+  // caption style, kept visually distinct from the overview via the pane
+  // divider rather than their own card chrome.
+  const sideSection = (title, content) => (
+    <div className="detail-side-section">
+      <div className="notif-section-title">{title}</div>
+      {content}
+    </div>
+  );
+
   return (
-    <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={760}>
-      {detailSection(Package, "Asset Information", <>
-        {row("Name", asset.name)}
-        {row("Department", asset.department)}
-        {row("Category", cat && (
-          <span style={{ display: "inline-flex", alignItems: "center" }}>
+    <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={1040}>
+      <div className="detail-hero">
+        <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>
+        {cat && (
+          <span className="detail-hero-chip">
             <span className="cat-dot" style={{ background: categoryColor(categories, asset.categoryId) }} />
             {cat.name}
           </span>
-        ))}
-        {row("Asset Type", asset.assetType)}
-      </>)}
-
-      {detailSection(Tags, "Device Details", <>
-        {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
-        {row("Manufactured Year / Year Model", asset.yearModel)}
-        {row("Serial Number", asset.serial)}
-        {row("Status", <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>)}
-        {row("Condition", asset.condition)}
-        {asset.assetType === "Non-IT" && row("Requires Calibration?", asset.requiresCalibration ? "Yes" : "No")}
-        {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Calibration Date", asset.calibrationDate)}
-        {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Next Recalibration Date", asset.nextCalibrationDate)}
-      </>)}
-
-      {detailSection(User, "Assignment", <>
-        {row("Location", loc?.name)}
-        {row("Assigned To", asset.assignedTo)}
-        {row("Added By", asset.createdByName)}
-      </>)}
-
-      {detailSection(Info, "Purchase & Warranty", <>
-        {row("Purchase Date", asset.purchaseDate)}
-        {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
-        {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
-      </>)}
-
-      <div className="detail-full">
-        <div className="notif-section-title" style={{ marginTop: 14 }}>Notes</div>
-        <div className="notes-highlight">
-          {asset.notes || "No notes yet."}
-        </div>
-      </div>
-
-      <div className="detail-full">
-        <div className="notif-section-title" style={{ marginTop: 14 }}>Service &amp; Maintenance History</div>
-        {maintHistory.length === 0 ? (
-          <div className="notif-empty">No maintenance history yet for this asset.</div>
-        ) : (
-          <ul className="maint-history-list">
-            {maintHistory.map((m) => (
-              <li key={m.id} className="maint-history-item">
-                <span className="maint-history-date">{m.date}</span>
-                <span className="maint-history-desc">{m.description}</span>
-                {m.cost ? <span className="maint-history-cost">${m.cost}</span> : null}
-                <Badge color={maintStatusColor[m.status] || "#6B7280"}>{m.status}</Badge>
-              </li>
-            ))}
-          </ul>
         )}
+        <span className="detail-hero-chip"><MapPin size={12} /> {loc?.name || "No location"}</span>
+        {asset.assignedTo && <span className="detail-hero-chip"><User size={12} /> {asset.assignedTo}</span>}
       </div>
 
-      <div className="detail-full comments-section">
-        <div className="notif-section-title" style={{ marginTop: 14 }}>Comments</div>
-        <div className="comment-list chat-list">
-          {chronComments.length === 0 && (
-            <div className="notif-empty">No comments yet — use this to clarify something with the assigned user.</div>
-          )}
-          {chronComments.map((c) => {
-            const side = c.authorId === firstAuthorId ? "left" : "right";
-            return (
-              <div key={c.id} className={`chat-row chat-row-${side}`}>
-                <div className={`chat-bubble chat-bubble-${side}`}>
-                  <div className="comment-meta">
-                    <span className="comment-author">{c.authorName}</span>
-                    <span className="comment-time">{new Date(c.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
-                  </div>
-                  <div className="comment-text">{c.message}</div>
+      <div className="detail-layout">
+        <div className="detail-main">
+          {detailGroup(Package, "Asset Information", <>
+            {row("Name", asset.name)}
+            {row("Department", asset.department)}
+            {row("Category", cat?.name)}
+            {row("Asset Type", asset.assetType)}
+          </>)}
+
+          {detailGroup(Tags, "Device Details", <>
+            {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
+            {row("Year Model", asset.yearModel)}
+            {row("Serial Number", asset.serial)}
+            {row("Condition", asset.condition)}
+            {asset.assetType === "Non-IT" && row("Requires Calibration?", asset.requiresCalibration ? "Yes" : "No")}
+            {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Calibration Date", asset.calibrationDate)}
+            {asset.assetType === "Non-IT" && asset.requiresCalibration && row("Next Recalibration", asset.nextCalibrationDate)}
+          </>)}
+
+          {detailGroup(User, "Assignment", <>
+            {row("Location", loc?.name)}
+            {row("Assigned To", asset.assignedTo)}
+            {row("Added By", asset.createdByName)}
+          </>)}
+
+          {detailGroup(Info, "Purchase & Warranty", <>
+            {row("Purchase Date", asset.purchaseDate)}
+            {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
+            {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
+          </>)}
+
+          {asset.transferHistory && asset.transferHistory.length > 0 && (
+            <div className="detail-group">
+              <div className="detail-group-label"><Truck size={12} /> Transfer History</div>
+              {asset.transferHistory.map((t) => (
+                <div key={t.id} className="notif-item">
+                  {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })})
                 </div>
-              </div>
-            );
-          })}
+              ))}
+            </div>
+          )}
         </div>
-        <div className="comment-composer">
-          <textarea
-            value={commentText}
-            onChange={(e) => setCommentText(e.target.value)}
-            rows={2}
-            placeholder="Add a comment…"
-          />
-          <button type="button" className="btn primary" onClick={submitComment} disabled={!commentText.trim()}>
-            Send
-          </button>
-        </div>
-      </div>
 
-      {asset.transferHistory && asset.transferHistory.length > 0 && (
-        <div className="detail-transfer-history">
-          <div className="notif-section-title">Transfer History</div>
-          {asset.transferHistory.map((t) => (
-            <div key={t.id} className="notif-item">
-              {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })})
+        <div className="detail-side">
+          {sideSection("Notes", (
+            <div className="notes-highlight">{asset.notes || "No notes yet."}</div>
+          ))}
+
+          {sideSection("Service & Maintenance History", (
+            maintHistory.length === 0 ? (
+              <div className="notif-empty">No maintenance history yet for this asset.</div>
+            ) : (
+              <ul className="maint-history-list">
+                {maintHistory.map((m) => (
+                  <li key={m.id} className="maint-history-item">
+                    <span className="maint-history-date">{m.date}</span>
+                    <span className="maint-history-desc">{m.description}</span>
+                    {m.cost ? <span className="maint-history-cost">${m.cost}</span> : null}
+                    <Badge color={maintStatusColor[m.status] || "#6B7280"}>{m.status}</Badge>
+                  </li>
+                ))}
+              </ul>
+            )
+          ))}
+
+          {sideSection("Comments", (
+            <div className="comments-section">
+              <div className="comment-list chat-list">
+                {chronComments.length === 0 && (
+                  <div className="notif-empty">No comments yet — use this to clarify something with the assigned user.</div>
+                )}
+                {chronComments.map((c) => {
+                  const side = c.authorId === firstAuthorId ? "left" : "right";
+                  return (
+                    <div key={c.id} className={`chat-row chat-row-${side}`}>
+                      <div className={`chat-bubble chat-bubble-${side}`}>
+                        <div className="comment-meta">
+                          <span className="comment-author">{c.authorName}</span>
+                          <span className="comment-time">{new Date(c.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+                        </div>
+                        <div className="comment-text">{c.message}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="comment-composer">
+                <textarea
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  rows={2}
+                  placeholder="Add a comment…"
+                />
+                <button type="button" className="btn primary" onClick={submitComment} disabled={!commentText.trim()}>
+                  Send
+                </button>
+              </div>
             </div>
           ))}
         </div>
-      )}
+      </div>
 
-      <div className="modal-actions" style={{ marginTop: 18, justifyContent: "space-between" }}>
+      <div className="modal-footer-sticky" style={{ justifyContent: "space-between" }}>
         <button
           type="button"
           className="btn danger-outline"
@@ -3848,24 +3864,39 @@ function GlobalStyles() {
       .notif-item-btn { display: block; width: 100%; text-align: left; background: none; border: none; font-family: inherit; font-size: 12.5px; line-height: 1.4; color: inherit; cursor: pointer; padding: 6px 0; }
       .notif-item-btn:hover { color: var(--accent); }
 
-      .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
-      .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-      .detail-row:last-child { border-bottom: none; }
+      /* Asset Details modal — wide two-pane layout instead of one long
+         stacked column. A hero strip surfaces status/category/location at
+         a glance, then the overview (left) and notes/history/comments
+         (right) run side by side so the modal reads across, not down. */
+      .detail-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+      .detail-hero-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+      .detail-layout { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0 28px; align-items: start; }
+      .detail-main, .detail-side { min-width: 0; }
+      .detail-side { border-left: 1px solid var(--border); padding-left: 24px; }
+
+      .detail-group { padding: 10px 0; }
+      .detail-group + .detail-group { border-top: 1px solid var(--border); }
+      .detail-group-label { display: flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-soft); margin-bottom: 6px; }
+      .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+      .detail-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 12.5px; }
       .detail-row.detail-full { grid-column: 1 / -1; }
       .detail-label { color: var(--text-soft); font-weight: 500; }
       .detail-value { font-weight: 600; text-align: right; }
-      .detail-transfer-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 
-      .notes-highlight { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+      .detail-side-section { padding: 10px 0; }
+      .detail-side-section + .detail-side-section { border-top: 1px solid var(--border); }
+      .detail-side-section:first-child { padding-top: 0; }
 
-      .maint-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+      .notes-highlight { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 9px 11px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; }
+
+      .maint-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
       .maint-history-item { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
       .maint-history-date { color: var(--text-soft); font-family: ui-monospace, monospace; font-size: 12px; white-space: nowrap; }
       .maint-history-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .maint-history-cost { color: var(--text-soft); white-space: nowrap; }
 
-      .comments-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-      .comment-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; padding: 4px 2px; }
+      .comments-section { display: flex; flex-direction: column; }
+      .comment-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; margin-bottom: 10px; padding: 4px 2px; }
       .chat-row { display: flex; }
       .chat-row-left { justify-content: flex-start; }
       .chat-row-right { justify-content: flex-end; }
@@ -4126,7 +4157,11 @@ function GlobalStyles() {
         .form-section { padding: 14px; }
         .modal-footer-sticky { border-radius: 0; }
         .detail-grid { grid-template-columns: 1fr; }
-        .search-box { width: 100%; }
+        .detail-layout { grid-template-columns: 1fr; gap: 0; }
+        .detail-side { border-left: none; padding-left: 0; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+        .icon-btn { width: 38px; height: 38px; }
+        .notif-dot { min-width: 17px; height: 17px; font-size: 10px; }
+        .notif-panel { width: calc(100vw - 24px); right: -12px; max-height: min(360px, 70vh); }
         .view-head { flex-direction: column; align-items: stretch; }
         .view-actions { flex-wrap: wrap; }
         .view-actions .btn { flex: 1; justify-content: center; }
@@ -4140,7 +4175,6 @@ function GlobalStyles() {
         .fab-add:active { transform: scale(0.94); }
         .modal-overlay { padding: 0; align-items: flex-end; }
         .modal { max-width: 100% !important; width: 100%; max-height: 92vh; border-radius: 16px 16px 0 0; }
-        .notif-panel { width: calc(100vw - 24px); right: -12px; }
 
         /* Card-style tables: each row becomes a stacked card */
         .table-wrap table, .table-wrap thead, .table-wrap tbody, .table-wrap th, .table-wrap td, .table-wrap tr {
