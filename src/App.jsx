@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, User, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  KeyRound, ShieldCheck, AlertTriangle, Info,
+  KeyRound, ShieldCheck, AlertTriangle, Info, Clock,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
@@ -107,7 +107,7 @@ function computeAlerts(assets, scopedLocationId) {
     if (a.assetType === "IT" && a.warrantyExpiry) {
       const d = new Date(a.warrantyExpiry);
       if (!isNaN(d) && d <= in30) {
-        alerts.push({ id: `${a.id}-w`, urgent: d < now, label: `${a.tag} — warranty ${d < now ? "expired" : "expiring"} ${a.warrantyExpiry}` });
+        alerts.push({ id: `${a.id}-w`, assetId: a.id, urgent: d < now, label: `${a.tag} — warranty ${d < now ? "expired" : "expiring"} ${a.warrantyExpiry}` });
       }
     }
     if (a.assetType === "Non-IT" && a.requiresCalibration) {
@@ -115,7 +115,7 @@ function computeAlerts(assets, scopedLocationId) {
       if (checkDate) {
         const d = new Date(checkDate);
         if (!isNaN(d) && d <= in30) {
-          alerts.push({ id: `${a.id}-c`, urgent: d < now, label: `${a.tag} — calibration ${d < now ? "overdue" : "due"} ${checkDate}` });
+          alerts.push({ id: `${a.id}-c`, assetId: a.id, urgent: d < now, label: `${a.tag} — calibration ${d < now ? "overdue" : "due"} ${checkDate}` });
         }
       }
     }
@@ -368,10 +368,10 @@ function Modal({ title, onClose, children, width = 480 }) {
   );
 }
 
-function ConfirmDialog({ message, onCancel, onConfirm, confirmLabel = "Delete" }) {
+function ConfirmDialog({ message, onCancel, onConfirm, confirmLabel = "Delete", maxWidth }) {
   return (
     <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal confirm" onClick={(e) => e.stopPropagation()}>
+      <div className="modal confirm" style={maxWidth ? { maxWidth } : undefined} onClick={(e) => e.stopPropagation()}>
         <div className="confirm-icon"><AlertTriangle size={20} /></div>
         <p>{message}</p>
         <div className="confirm-actions">
@@ -783,7 +783,33 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
     ? locations.find((l) => l.id === scopedLocationId)?.name
     : "All Locations (HQ)";
 
-  const alerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
+  // Warranty/calibration alerts are derived from live asset data rather than
+  // stored rows, so "read" state for them is tracked per-user in
+  // localStorage instead of the database — dismissing one just hides it
+  // for this user on this browser until it's clicked again.
+  const readAlertsKey = `read-alerts-${currentUser.id}`;
+  const [readAlertIds, setReadAlertIds] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(readAlertsKey)) || []; } catch { return []; }
+  });
+  useEffect(() => {
+    try { setReadAlertIds(JSON.parse(localStorage.getItem(readAlertsKey)) || []); } catch { setReadAlertIds([]); }
+  }, [readAlertsKey]);
+  const markAlertRead = (alertId) => {
+    setReadAlertIds((prev) => {
+      if (prev.includes(alertId)) return prev;
+      const next = [...prev, alertId];
+      try { localStorage.setItem(readAlertsKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+  const openAlert = (alert) => {
+    markAlertRead(alert.id);
+    setNotifOpen(false);
+    if (onOpenAsset) onOpenAsset(alert.assetId);
+  };
+
+  const allAlerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
+  const alerts = useMemo(() => allAlerts.filter((a) => !readAlertIds.includes(a.id)), [allAlerts, readAlertIds]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
   const myComments = useMemo(
     () => (data.comments || []).filter((c) => {
@@ -841,7 +867,15 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
                   <div className="notif-empty">You're all caught up.</div>
                 )}
                 {alerts.slice(0, 8).map((a) => (
-                  <div key={a.id} className={`notif-item ${a.urgent ? "urgent" : ""}`}>{a.label}</div>
+                  <button
+                    key={a.id}
+                    type="button"
+                    className={`notif-item notif-item-btn ${a.urgent ? "urgent" : ""}`}
+                    onClick={() => openAlert(a)}
+                    title="View asset"
+                  >
+                    {a.label}
+                  </button>
                 ))}
                 {myComments.map((c) => {
                   const asset = data.assets.find((a) => a.id === c.assetId);
@@ -893,6 +927,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
         <ConfirmDialog
           message="Sign out of AssetHub?"
           confirmLabel="Yes"
+          maxWidth={260}
           onCancel={() => setConfirmLogoutOpen(false)}
           onConfirm={() => { setConfirmLogoutOpen(false); onLogout(); }}
         />
@@ -959,7 +994,6 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
     inUse: assets.filter((a) => a.status === "In Use").length,
     underRepair: assets.filter((a) => a.status === "Under Repair").length,
     inStock: assets.filter((a) => a.status === "In Stock").length,
-    value: assets.reduce((sum, a) => sum + (Number(a.purchaseCost) || 0), 0),
   };
   const pct = (n) => (assets.length ? Math.round((n / assets.length) * 100) : 0);
 
@@ -1000,6 +1034,29 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
       }
     });
     return { thisMonth, next30, expired };
+  }, [assets]);
+
+  // Calibration Overview: same shape as Warranty Overview, but for Non-IT
+  // assets that require calibration, checked against nextCalibrationDate
+  // (falling back to calibrationDate if that's the only date on record).
+  const calibrationStats = useMemo(() => {
+    const now = new Date();
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    let thisMonth = 0, next30 = 0, overdue = 0;
+    assets.forEach((a) => {
+      if (a.assetType !== "Non-IT" || !a.requiresCalibration) return;
+      const checkDate = a.nextCalibrationDate || a.calibrationDate;
+      if (!checkDate) return;
+      const d = new Date(checkDate);
+      if (isNaN(d)) return;
+      if (d < now) overdue += 1;
+      else {
+        if (d <= monthEnd) thisMonth += 1;
+        if (d <= in30) next30 += 1;
+      }
+    });
+    return { thisMonth, next30, overdue };
   }, [assets]);
 
   // Regional Staff should only see activity for assets in their own
@@ -1094,6 +1151,24 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
               <div className="warranty-stat-icon" style={{ background: "#FEE2E222", color: "#EF4444" }}><AlertTriangle size={16} /></div>
               <div className="warranty-stat-value">{warrantyStats.expired}</div>
               <div className="warranty-stat-label">Expired<br />Assets</div>
+            </div>
+          </div>
+          <div className="panel-head panel-head-sub"><h3>Calibration Overview</h3></div>
+          <div className="warranty-stats">
+            <div className="warranty-stat">
+              <div className="warranty-stat-icon" style={{ background: "#D1FAE522", color: "#10B981" }}><ShieldCheck size={16} /></div>
+              <div className="warranty-stat-value">{calibrationStats.thisMonth}</div>
+              <div className="warranty-stat-label">This Month<br />Due</div>
+            </div>
+            <div className="warranty-stat">
+              <div className="warranty-stat-icon" style={{ background: "#FEF3C722", color: "#F59E0B" }}><Bell size={16} /></div>
+              <div className="warranty-stat-value">{calibrationStats.next30}</div>
+              <div className="warranty-stat-label">Next 30 Days<br />Due</div>
+            </div>
+            <div className="warranty-stat">
+              <div className="warranty-stat-icon" style={{ background: "#FEE2E222", color: "#EF4444" }}><AlertTriangle size={16} /></div>
+              <div className="warranty-stat-value">{calibrationStats.overdue}</div>
+              <div className="warranty-stat-label">Overdue<br />Assets</div>
             </div>
           </div>
         </div>
@@ -1283,6 +1358,21 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     return set;
   }, [data.comments, currentUser.id]);
 
+  // Assets with an upcoming/overdue warranty or calibration issue — same
+  // source data as the notification bell, mapped by asset id so the table
+  // can flag it with a small icon (see the legend above the table).
+  const assetAlertMap = useMemo(() => {
+    const map = new Map();
+    computeAlerts(data.assets, scopedLocationId).forEach((al) => {
+      const kind = al.id.endsWith("-w") ? "warranty" : "calibration";
+      const existing = map.get(al.assetId);
+      if (!existing || (al.urgent && !existing.urgent)) {
+        map.set(al.assetId, { urgent: al.urgent, kind });
+      }
+    });
+    return map;
+  }, [data.assets, scopedLocationId]);
+
   // Opening an asset's detail view (from the table, or from a notification)
   // also clears its unread-comment flag for the current user.
   useEffect(() => {
@@ -1310,6 +1400,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [inUsePromptAsset, setInUsePromptAsset] = useState(null); // asset awaiting department/assigned user before going In Use
   const [inUseDepartment, setInUseDepartment] = useState("");
   const [inUseAssignedTo, setInUseAssignedTo] = useState("");
+  const [inUseLocationId, setInUseLocationId] = useState("");
   const [bulkDeleteText, setBulkDeleteText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
@@ -1482,6 +1573,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     if (newStatus === "In Use") {
       setInUseDepartment(asset.department || "");
       setInUseAssignedTo(asset.assignedTo || "");
+      setInUseLocationId(asset.locationId || "");
       setInUsePromptAsset(asset);
       return;
     }
@@ -1502,7 +1594,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const submitInUseAssignment = () => {
     const asset = inUsePromptAsset;
     if (!asset) return;
-    let finalAsset = { ...asset, status: "In Use", department: inUseDepartment, assignedTo: inUseAssignedTo };
+    let finalAsset = { ...asset, status: "In Use", department: inUseDepartment, assignedTo: inUseAssignedTo, locationId: inUseLocationId };
     if (asset.status === "Under Repair") finalAsset.preRepairStatus = null;
     finalAsset = applyStatusSideEffects(finalAsset);
     const next = withLog({
@@ -1839,6 +1931,20 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         <Plus size={22} />
       </button>
 
+      {(assetAlertMap.size > 0 || unreadCommentAssetIds.size > 0) && (
+        <div className="table-legend">
+          {unreadCommentAssetIds.size > 0 && (
+            <span className="table-legend-item"><MessageCircle size={13} className="comment-flag" /> New comment</span>
+          )}
+          {assetAlertMap.size > 0 && (
+            <>
+              <span className="table-legend-item"><Clock size={13} className="alert-flag" /> Warranty/calibration due soon</span>
+              <span className="table-legend-item"><AlertTriangle size={13} className="alert-flag alert-flag-urgent" /> Expired/overdue</span>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="panel">
         <div className="table-wrap">
           <table>
@@ -1893,6 +1999,13 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                       {unreadCommentAssetIds.has(a.id) && (
                         <MessageCircle size={13} className="comment-flag" title="New comment on this asset" />
                       )}
+                      {assetAlertMap.has(a.id) && (() => {
+                        const info = assetAlertMap.get(a.id);
+                        const label = `${info.kind === "warranty" ? "Warranty" : "Calibration"} ${info.urgent ? (info.kind === "warranty" ? "expired" : "overdue") : (info.kind === "warranty" ? "expiring soon" : "due soon")}`;
+                        return info.urgent
+                          ? <AlertTriangle size={13} className="alert-flag alert-flag-urgent" title={label} />
+                          : <Clock size={13} className="alert-flag" title={label} />;
+                      })()}
                     </td>
                     <td data-label="Name">
                       {a.name}
@@ -1985,6 +2098,15 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                 onChange={setInUseAssignedTo}
                 options={Array.from(new Set(data.assets.map((a) => a.assignedTo).filter(Boolean))).sort().map((v) => ({ value: v, label: v }))}
                 placeholder="Search or type a name"
+              />
+            </Field>
+            <Field label="Location">
+              <SearchableSelect
+                value={inUseLocationId}
+                onChange={setInUseLocationId}
+                options={data.locations.map((l) => ({ value: l.id, label: l.name }))}
+                placeholder="Search locations"
+                allowCustom={false}
               />
             </Field>
           </div>
@@ -3708,6 +3830,11 @@ function GlobalStyles() {
       .link-tag { background: none; border: none; padding: 0; font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
       .link-tag:hover { opacity: 0.8; }
       .comment-flag { color: var(--danger); margin-left: 6px; vertical-align: middle; }
+      .alert-flag { color: #F59E0B; margin-left: 6px; vertical-align: middle; }
+      .alert-flag-urgent { color: var(--danger); }
+      .table-legend { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; font-size: 12px; color: var(--text-soft); margin: 0 0 10px 2px; }
+      .table-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+      .table-legend-item svg { margin-left: 0 !important; }
 
       .notif-wrap { position: relative; }
       .notif-dot { position: absolute; top: -3px; right: -3px; background: var(--danger); color: white; font-size: 9.5px; font-weight: 700; border-radius: 999px; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
@@ -3761,7 +3888,7 @@ function GlobalStyles() {
       .welcome-sub { font-size: 13px; color: var(--text-soft); margin: 4px 0 0; }
       .welcome-icon { width: 52px; height: 52px; border-radius: 14px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
-      .metrics-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 18px; }
+      .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
       .metric { background: var(--surface); border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
       .metric-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
       .metric-icon { width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -3774,15 +3901,17 @@ function GlobalStyles() {
       .chart-card { min-height: 230px; }
       .charts-row-3 .chart-card { min-height: 210px; padding-bottom: 4px; }
       .empty-chart { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--text-soft); font-size: 13px; }
-      .donut-body { display: flex; align-items: center; gap: 14px; padding: 6px 18px 16px; }
+      .donut-body { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 6px 18px 16px; }
 
       .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
       .panel-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
       .panel-head h3 { font-size: 14.5px; }
+      .panel-head-sub { padding: 10px 18px 8px; border-top: 1px solid var(--border); border-bottom: none; margin-top: 4px; }
+      .panel-head-sub h3 { font-size: 12.5px; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.03em; }
       .panel-link { background: none; border: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; padding: 0; }
       .panel-link:hover { text-decoration: underline; }
 
-      .legend-scroll-wrap { position: relative; flex: 1; min-width: 0; }
+      .legend-scroll-wrap { position: relative; flex: 0 1 240px; min-width: 0; max-width: 240px; }
       .legend-list {
         list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0;
         max-height: 132px; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none;
