@@ -1005,16 +1005,16 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
       </div>
 
       <div className={`charts-row ${isAdmin ? "charts-row-3" : ""}`}>
-        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} total={assets.length} onViewAll={() => setView?.("assets")} />
-        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} total={assets.length} onViewAll={() => setView?.("categories")} />
+        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} total={assets.length} />
+        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} total={assets.length} />
         {isAdmin && (
-          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} total={data.assets.length} onViewAll={() => setView?.("locations")} />
+          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} total={data.assets.length} />
         )}
       </div>
 
       <div className="bottom-row">
         <div className="panel health-panel">
-          <div className="panel-head"><h3>Asset Health</h3><button type="button" className="panel-link" onClick={() => setView?.("assets")}>View report</button></div>
+          <div className="panel-head"><h3>Asset Health</h3></div>
           <div className="health-body">
             <div className="health-ring-wrap">
               <ResponsiveContainer width={132} height={132}>
@@ -1047,7 +1047,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
         </div>
 
         <div className="panel">
-          <div className="panel-head"><h3>Warranty Overview</h3><button type="button" className="panel-link" onClick={() => setView?.("assets")}>View all</button></div>
+          <div className="panel-head"><h3>Warranty Overview</h3></div>
           <div className="warranty-stats">
             <div className="warranty-stat">
               <div className="warranty-stat-icon" style={{ background: "#D1FAE522", color: "#10B981" }}><ShieldCheck size={16} /></div>
@@ -1132,13 +1132,50 @@ function Metric({ label, value, sub, icon: Icon, color }) {
   );
 }
 
-function DonutCard({ title, data, palette, total, onViewAll }) {
+// A legend list that scrolls instead of cramping when there are many
+// entries (lots of categories/locations), with the scrollbar itself hidden
+// and a small bobbing chevron shown only when there's actually more
+// content in that direction — so it reads as "scrollable" without a
+// visible scrollbar cluttering the card.
+function ScrollableLegend({ children }) {
+  const ref = React.useRef(null);
+  const [canUp, setCanUp] = useState(false);
+  const [canDown, setCanDown] = useState(false);
+
+  const check = () => {
+    const el = ref.current;
+    if (!el) return;
+    setCanUp(el.scrollTop > 2);
+    setCanDown(el.scrollHeight - el.scrollTop - el.clientHeight > 2);
+  };
+
+  useEffect(() => {
+    check();
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [children]);
+
+  return (
+    <div className="legend-scroll-wrap">
+      <ul className="legend-list" ref={ref} onScroll={check}>
+        {children}
+      </ul>
+      {canUp && <ChevronUp size={13} className="legend-scroll-hint legend-scroll-hint-up" />}
+      {canDown && <ChevronDown size={13} className="legend-scroll-hint legend-scroll-hint-down" />}
+    </div>
+  );
+}
+
+function DonutCard({ title, data, palette, total }) {
   const colors = (name, i) => (palette && palette[name]) || CAT_PALETTE[i % CAT_PALETTE.length];
   return (
     <div className="panel chart-card">
       <div className="panel-head">
         <h3>{title}</h3>
-        {onViewAll && <button type="button" className="panel-link" onClick={onViewAll}>View all</button>}
       </div>
       {data.length === 0 ? (
         <div className="empty-chart">No data to display</div>
@@ -1154,7 +1191,7 @@ function DonutCard({ title, data, palette, total, onViewAll }) {
               <Tooltip contentStyle={{ fontSize: 12, padding: "6px 10px", borderRadius: 8 }} itemStyle={{ fontSize: 12 }} labelStyle={{ fontSize: 12 }} />
             </PieChart>
           </ResponsiveContainer>
-          <ul className="legend-list">
+          <ScrollableLegend>
             {data.map((entry, i) => (
               <li key={entry.name}>
                 <span className="legend-dot" style={{ background: colors(entry.name, i) }} />
@@ -1162,7 +1199,7 @@ function DonutCard({ title, data, palette, total, onViewAll }) {
                 <span className="legend-count">{entry.value} <span className="legend-pct">({total ? Math.round((entry.value / total) * 100) : 0}%)</span></span>
               </li>
             ))}
-          </ul>
+          </ScrollableLegend>
         </div>
       )}
     </div>
@@ -3505,12 +3542,25 @@ function GlobalStyles() {
       .panel-link { background: none; border: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; padding: 0; }
       .panel-link:hover { text-decoration: underline; }
 
-      .legend-list { list-style: none; margin: 0; padding: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-      .legend-list li { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+      .legend-scroll-wrap { position: relative; flex: 1; min-width: 0; }
+      .legend-list {
+        list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0;
+        max-height: 132px; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none;
+      }
+      .legend-list::-webkit-scrollbar { display: none; }
+      .legend-list li { display: flex; align-items: center; gap: 7px; font-size: 12.5px; flex-shrink: 0; }
       .legend-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
       .legend-name { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .legend-count { color: var(--text-soft); font-weight: 600; white-space: nowrap; }
       .legend-pct { font-weight: 400; }
+      .legend-scroll-hint {
+        position: absolute; left: 50%; transform: translateX(-50%); color: var(--accent);
+        background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+        padding: 1px; pointer-events: none; animation: legendBob 1.3s ease-in-out infinite;
+      }
+      .legend-scroll-hint-down { bottom: -3px; }
+      .legend-scroll-hint-up { top: -3px; }
+      @keyframes legendBob { 0%, 100% { opacity: 0.6; transform: translate(-50%, 0); } 50% { opacity: 1; transform: translate(-50%, 2px); } }
 
       .bottom-row { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 14px; align-items: start; }
       .health-body { display: flex; align-items: center; gap: 16px; padding: 10px 18px 20px; }
