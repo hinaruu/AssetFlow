@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, User, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  KeyRound, ShieldCheck, AlertTriangle, Info,
+  KeyRound, ShieldCheck, AlertTriangle, Info, DollarSign,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
@@ -448,8 +448,8 @@ function LoginScreen({ users, onLogin }) {
     <div className="login-wrap">
       <div className="login-card">
         <div className="login-logo">
-          <ShieldCheck size={22} />
-          <span>AssetFlow</span>
+          <span className="brand-badge"><ShieldCheck size={18} /></span>
+          <span>Astuto Assets</span>
         </div>
         <p className="login-sub">Sign in to manage IT &amp; facility assets.</p>
         <div onKeyDown={(e) => { if (e.key === "Enter") submit(e); }}>
@@ -660,7 +660,7 @@ export default function App() {
           />
           <div className="content">
             {view === "dashboard" && (
-              <Dashboard data={data} scopedLocationId={scopedLocationId} currentUser={currentUser} />
+              <Dashboard data={data} scopedLocationId={scopedLocationId} currentUser={currentUser} setView={setView} />
             )}
             {view === "assets" && (
               <AssetsView
@@ -725,8 +725,8 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
       {open && <div className="sidebar-backdrop" onClick={onToggle} />}
       <div className={`sidebar ${open ? "" : "collapsed"}`}>
         <div className="sidebar-top">
-          {open && <div className="brand"><ShieldCheck size={18} /><span>AssetFlow</span></div>}
-          {!open && <div className="brand-mini"><ShieldCheck size={18} /></div>}
+          {open && <div className="brand"><span className="brand-badge"><ShieldCheck size={16} /></span><span>Astuto Assets</span></div>}
+          {!open && <div className="brand-mini"><span className="brand-badge"><ShieldCheck size={16} /></span></div>}
         </div>
         <nav>
           {items.map((it) => (
@@ -882,7 +882,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
 /* ---------------------------------------------------------
    Dashboard
 --------------------------------------------------------- */
-function Dashboard({ data, scopedLocationId, currentUser }) {
+function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   const isAdmin = currentUser?.role === "Admin";
   const assets = scopedLocationId
     ? data.assets.filter((a) => a.locationId === scopedLocationId)
@@ -901,7 +901,7 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
       const name = cat ? cat.name : "Uncategorized";
       counts[name] = (counts[name] || 0) + 1;
     });
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+    return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [assets, data.categories]);
 
   // Admin-only: how assets break down across every location/country. Not
@@ -915,7 +915,7 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
       const name = loc ? loc.name : "Unassigned";
       counts[name] = (counts[name] || 0) + 1;
     });
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+    return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [isAdmin, data.assets, data.locations]);
 
   // Same index-based assignment as categoryColor() so the pie chart and the
@@ -937,9 +937,50 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
     inUse: assets.filter((a) => a.status === "In Use").length,
     underRepair: assets.filter((a) => a.status === "Under Repair").length,
     inStock: assets.filter((a) => a.status === "In Stock").length,
+    value: assets.reduce((sum, a) => sum + (Number(a.purchaseCost) || 0), 0),
   };
+  const pct = (n) => (assets.length ? Math.round((n / assets.length) * 100) : 0);
 
-  const recent = [...assets].sort((a, b) => (b.tag > a.tag ? 1 : -1)).slice(0, 6);
+  // Asset Health: a derived read on the fleet's condition, built from data
+  // that's already tracked (Condition, status, and the same warranty/
+  // calibration alerts the notification bell uses) rather than inventing a
+  // new field — Critical is anything actually down or in poor shape, Needs
+  // Attention is anything with an upcoming warranty/calibration issue or
+  // fair condition, everything else counts as Healthy.
+  const alerts = useMemo(() => computeAlerts(assets, null), [assets]);
+  const alertAssetIds = useMemo(() => new Set(alerts.map((a) => a.id.replace(/-[wc]$/, ""))), [alerts]);
+  const health = useMemo(() => {
+    let healthy = 0, attention = 0, critical = 0;
+    assets.forEach((a) => {
+      if (a.status === "Under Repair" || a.condition === "Poor") critical += 1;
+      else if (alertAssetIds.has(a.id) || a.condition === "Fair") attention += 1;
+      else healthy += 1;
+    });
+    return { healthy, attention, critical };
+  }, [assets, alertAssetIds]);
+  const healthyPct = assets.length ? Math.round((health.healthy / assets.length) * 100) : 0;
+
+  // Warranty Overview: real counts from each IT asset's warrantyExpiry date
+  // (assets without a tracked warranty — "N/A" or blank — are excluded).
+  const warrantyStats = useMemo(() => {
+    const now = new Date();
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    let thisMonth = 0, next30 = 0, expired = 0;
+    assets.forEach((a) => {
+      if (a.assetType !== "IT" || !a.warrantyExpiry || a.warrantyExpiry === "N/A") return;
+      const d = new Date(a.warrantyExpiry);
+      if (isNaN(d)) return;
+      if (d < now) expired += 1;
+      else {
+        if (d <= monthEnd) thisMonth += 1;
+        if (d <= in30) next30 += 1;
+      }
+    });
+    return { thisMonth, next30, expired };
+  }, [assets]);
+
+  const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 5), [data.auditLog]);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -956,104 +997,173 @@ function Dashboard({ data, scopedLocationId, currentUser }) {
       </div>
 
       <div className="metrics-row">
-        <Metric label="Total Assets" value={totals.total} icon={Package} color="#6366F1" />
-        <Metric label="In Use" value={totals.inUse} icon={CheckSquare} color={STATUS_COLORS["In Use"]} />
-        <Metric label="In Stock" value={totals.inStock} icon={Archive} color={STATUS_COLORS["In Stock"]} />
-        <Metric label="Under Repair" value={totals.underRepair} icon={Wrench} color={STATUS_COLORS["Under Repair"]} />
+        <Metric label="Total Assets" value={totals.total} sub={isAdmin ? `Across ${data.locations.length} location${data.locations.length === 1 ? "" : "s"}` : "In this location"} icon={Package} color="#6366F1" />
+        <Metric label="In Use" value={totals.inUse} sub={`${pct(totals.inUse)}% of all assets`} icon={CheckSquare} color={STATUS_COLORS["In Use"]} />
+        <Metric label="In Stock" value={totals.inStock} sub={`${pct(totals.inStock)}% of all assets`} icon={Archive} color={STATUS_COLORS["In Stock"]} />
+        <Metric label="Under Repair" value={totals.underRepair} sub={`${pct(totals.underRepair)}% of all assets`} icon={Wrench} color={STATUS_COLORS["Under Repair"]} />
+        <Metric label="Total Asset Value" value={`$${totals.value.toLocaleString()}`} sub="Total purchase cost on record" icon={DollarSign} color="#0EA5E9" />
       </div>
 
       <div className={`charts-row ${isAdmin ? "charts-row-3" : ""}`}>
-        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} compact={isAdmin} />
-        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} compact={isAdmin} />
+        <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} total={assets.length} onViewAll={() => setView?.("assets")} />
+        <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} total={assets.length} onViewAll={() => setView?.("categories")} />
         {isAdmin && (
-          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} compact />
+          <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} total={data.assets.length} onViewAll={() => setView?.("locations")} />
         )}
       </div>
 
-      <div className="panel">
-        <div className="panel-head">
-          <h3>Recent Inventory</h3>
+      <div className="bottom-row">
+        <div className="panel health-panel">
+          <div className="panel-head"><h3>Asset Health</h3><button type="button" className="panel-link" onClick={() => setView?.("assets")}>View report</button></div>
+          <div className="health-body">
+            <div className="health-ring-wrap">
+              <ResponsiveContainer width={132} height={132}>
+                <PieChart>
+                  <Pie
+                    data={[
+                      { name: "Healthy", value: health.healthy },
+                      { name: "Needs Attention", value: health.attention },
+                      { name: "Critical", value: health.critical },
+                    ].filter((d) => d.value > 0)}
+                    dataKey="value" nameKey="name" innerRadius={46} outerRadius={62} startAngle={90} endAngle={-270} paddingAngle={health.healthy && (health.attention || health.critical) ? 3 : 0}
+                  >
+                    <Cell fill="#10B981" />
+                    <Cell fill="#F59E0B" />
+                    <Cell fill="#EF4444" />
+                  </Pie>
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="health-ring-center">
+                <div className="health-ring-pct">{assets.length ? `${healthyPct}%` : "—"}</div>
+                <div className="health-ring-label">Healthy</div>
+              </div>
+            </div>
+            <ul className="legend-list">
+              <li><span className="legend-dot" style={{ background: "#10B981" }} /><span className="legend-name">Healthy</span><span className="legend-count">{health.healthy}</span></li>
+              <li><span className="legend-dot" style={{ background: "#F59E0B" }} /><span className="legend-name">Needs Attention</span><span className="legend-count">{health.attention}</span></li>
+              <li><span className="legend-dot" style={{ background: "#EF4444" }} /><span className="legend-name">Critical</span><span className="legend-count">{health.critical}</span></li>
+            </ul>
+          </div>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Asset Tag</th>
-                <th>Name</th>
-                <th>Category</th>
-                <th>Location</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.length === 0 && (
-                <tr><td colSpan={5} className="empty-cell">No assets yet — add one from the Assets tab.</td></tr>
-              )}
-              {recent.map((a) => {
-                const cat = data.categories.find((c) => c.id === a.categoryId);
-                const loc = data.locations.find((l) => l.id === a.locationId);
-                return (
-                  <tr key={a.id}>
-                    <td className="mono" data-label="Asset Tag">{a.tag}</td>
-                    <td data-label="Name">{a.name}</td>
-                    <td data-label="Category">
-                      {cat && <span className="cat-dot" style={{ background: categoryColor(data.categories, a.categoryId) }} />}
-                      {cat?.name || "—"}
-                    </td>
-                    <td data-label="Location">{loc?.name || "—"}</td>
-                    <td data-label="Status"><Badge color={STATUS_COLORS[a.status] || "#6B7280"}>{a.status}</Badge></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+
+        <div className="panel">
+          <div className="panel-head"><h3>Warranty Overview</h3><button type="button" className="panel-link" onClick={() => setView?.("assets")}>View all</button></div>
+          <div className="warranty-stats">
+            <div className="warranty-stat">
+              <div className="warranty-stat-icon" style={{ background: "#D1FAE522", color: "#10B981" }}><ShieldCheck size={16} /></div>
+              <div className="warranty-stat-value">{warrantyStats.thisMonth}</div>
+              <div className="warranty-stat-label">This Month<br />Expiring</div>
+            </div>
+            <div className="warranty-stat">
+              <div className="warranty-stat-icon" style={{ background: "#FEF3C722", color: "#F59E0B" }}><Bell size={16} /></div>
+              <div className="warranty-stat-value">{warrantyStats.next30}</div>
+              <div className="warranty-stat-label">Next 30 Days<br />Expiring</div>
+            </div>
+            <div className="warranty-stat">
+              <div className="warranty-stat-icon" style={{ background: "#FEE2E222", color: "#EF4444" }}><AlertTriangle size={16} /></div>
+              <div className="warranty-stat-value">{warrantyStats.expired}</div>
+              <div className="warranty-stat-label">Expired<br />Assets</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head"><h3>Recent Activity</h3><button type="button" className="panel-link" onClick={() => setView?.("reports")}>View all</button></div>
+          <ul className="activity-list">
+            {recentActivity.length === 0 && <li className="activity-empty">No activity yet.</li>}
+            {recentActivity.map((l) => {
+              const act = activityStyle(l.message);
+              return (
+                <li key={l.id} className="activity-item">
+                  <span className="activity-icon" style={{ background: `${act.color}1a`, color: act.color }}><act.Icon size={13} /></span>
+                  <span className="activity-text">{l.message}</span>
+                  <span className="activity-time">{formatLogTime(l.at)}</span>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       </div>
     </div>
   );
 }
 
-function Metric({ label, value, icon: Icon, color }) {
+// Picks an icon + color for a Recent Activity row based on the audit-log
+// message's wording, so the list reads at a glance like the rest of the app
+// (green = added, blue = assignment, purple = transfer, orange = repair).
+function activityStyle(message) {
+  const m = (message || "").toLowerCase();
+  if (m.includes("added")) return { Icon: Plus, color: "#10B981" };
+  if (m.includes("transferred")) return { Icon: Truck, color: "#8B5CF6" };
+  if (m.includes("repair") || m.includes("maintenance")) return { Icon: Wrench, color: "#F59E0B" };
+  if (m.includes("deleted")) return { Icon: Trash2, color: "#EF4444" };
+  if (m.includes("assigned") || m.includes("checked out")) return { Icon: User, color: "#3B82F6" };
+  return { Icon: Info, color: "#6B7280" };
+}
+
+// Formats an ISO timestamp the way the reference design does — "Today,
+// 11:32 AM" / "Yesterday, 9:15 AM" / a plain date further back.
+function formatLogTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const now = new Date();
+  const isSameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (isSameDay(d, now)) return `Today, ${time}`;
+  if (isSameDay(d, yesterday)) return `Yesterday, ${time}`;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function Metric({ label, value, sub, icon: Icon, color }) {
   return (
     <div className="metric">
-      {Icon && (
-        <div className="metric-icon" style={{ background: `${color}22`, color }}>
-          <Icon size={16} />
-        </div>
-      )}
+      <div className="metric-top">
+        {Icon && (
+          <div className="metric-icon" style={{ background: `${color}22`, color }}>
+            <Icon size={15} />
+          </div>
+        )}
+        <div className="metric-label">{label}</div>
+      </div>
       <div className="metric-value">{value}</div>
-      <div className="metric-label">{label}</div>
+      {sub && <div className="metric-sub">{sub}</div>}
     </div>
   );
 }
 
-function DonutCard({ title, data, palette, compact }) {
+function DonutCard({ title, data, palette, total, onViewAll }) {
   const colors = (name, i) => (palette && palette[name]) || CAT_PALETTE[i % CAT_PALETTE.length];
   return (
     <div className="panel chart-card">
-      <div className="panel-head"><h3>{title}</h3></div>
+      <div className="panel-head">
+        <h3>{title}</h3>
+        {onViewAll && <button type="button" className="panel-link" onClick={onViewAll}>View all</button>}
+      </div>
       {data.length === 0 ? (
         <div className="empty-chart">No data to display</div>
       ) : (
-        <ResponsiveContainer width="100%" height={compact ? 168 : 190}>
-          <PieChart>
-            <Pie data={data} dataKey="value" nameKey="name" innerRadius={compact ? 36 : 44} outerRadius={compact ? 54 : 66} paddingAngle={2}>
-              {data.map((entry, i) => (
-                <Cell key={entry.name} fill={colors(entry.name, i)} />
-              ))}
-            </Pie>
-            <Tooltip
-              contentStyle={{ fontSize: 12, padding: "6px 10px", borderRadius: 8 }}
-              itemStyle={{ fontSize: 12 }}
-              labelStyle={{ fontSize: 12 }}
-            />
-            <Legend
-              wrapperStyle={{ fontSize: compact ? 10 : 11, lineHeight: "15px" }}
-              iconSize={7}
-              iconType="circle"
-            />
-          </PieChart>
-        </ResponsiveContainer>
+        <div className="donut-body">
+          <ResponsiveContainer width={150} height={150}>
+            <PieChart>
+              <Pie data={data} dataKey="value" nameKey="name" innerRadius={44} outerRadius={62} paddingAngle={2}>
+                {data.map((entry, i) => (
+                  <Cell key={entry.name} fill={colors(entry.name, i)} />
+                ))}
+              </Pie>
+              <Tooltip contentStyle={{ fontSize: 12, padding: "6px 10px", borderRadius: 8 }} itemStyle={{ fontSize: 12 }} labelStyle={{ fontSize: 12 }} />
+            </PieChart>
+          </ResponsiveContainer>
+          <ul className="legend-list">
+            {data.map((entry, i) => (
+              <li key={entry.name}>
+                <span className="legend-dot" style={{ background: colors(entry.name, i) }} />
+                <span className="legend-name">{entry.name}</span>
+                <span className="legend-count">{entry.value} <span className="legend-pct">({total ? Math.round((entry.value / total) * 100) : 0}%)</span></span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
@@ -3304,6 +3414,7 @@ function GlobalStyles() {
       .sidebar.collapsed { width: 64px; }
       .sidebar-top { display: flex; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
       .brand { display: flex; align-items: center; gap: 8px; font-family: 'Poppins', sans-serif; font-weight: 700; color: var(--accent); white-space: nowrap; }
+      .brand-badge { width: 28px; height: 28px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #7C3AED)); color: white; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
       .brand-mini { display: flex; align-items: center; justify-content: center; color: var(--accent); width: 100%; }
       nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
       .nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: none; background: none; color: var(--text-soft); cursor: pointer; font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; }
@@ -3373,21 +3484,53 @@ function GlobalStyles() {
       .welcome-sub { font-size: 13px; color: var(--text-soft); margin: 4px 0 0; }
       .welcome-icon { width: 52px; height: 52px; border-radius: 14px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
-      .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+      .metrics-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 18px; }
       .metric { background: var(--surface); border-radius: 16px; padding: 16px 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-      .metric-icon { width: 32px; height: 32px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
-      .metric-value { font-size: 26px; font-weight: 700; font-family: 'Poppins', sans-serif; }
-      .metric-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+      .metric-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .metric-icon { width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .metric-value { font-size: 24px; font-weight: 700; font-family: 'Poppins', sans-serif; }
+      .metric-label { font-size: 12px; color: var(--text-soft); font-weight: 600; }
+      .metric-sub { font-size: 11px; color: var(--text-soft); margin-top: 3px; }
 
       .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
       .charts-row-3 { grid-template-columns: repeat(3, 1fr); }
       .chart-card { min-height: 230px; }
       .charts-row-3 .chart-card { min-height: 210px; padding-bottom: 4px; }
       .empty-chart { display: flex; align-items: center; justify-content: center; height: 220px; color: var(--text-soft); font-size: 13px; }
+      .donut-body { display: flex; align-items: center; gap: 14px; padding: 6px 18px 16px; }
 
       .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
-      .panel-head { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+      .panel-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
       .panel-head h3 { font-size: 14.5px; }
+      .panel-link { background: none; border: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; padding: 0; }
+      .panel-link:hover { text-decoration: underline; }
+
+      .legend-list { list-style: none; margin: 0; padding: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+      .legend-list li { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+      .legend-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
+      .legend-name { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .legend-count { color: var(--text-soft); font-weight: 600; white-space: nowrap; }
+      .legend-pct { font-weight: 400; }
+
+      .bottom-row { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 14px; align-items: start; }
+      .health-body { display: flex; align-items: center; gap: 16px; padding: 10px 18px 20px; }
+      .health-ring-wrap { position: relative; width: 132px; height: 132px; flex-shrink: 0; }
+      .health-ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+      .health-ring-pct { font-size: 22px; font-weight: 700; font-family: 'Poppins', sans-serif; color: #10B981; }
+      .health-ring-label { font-size: 10.5px; color: var(--text-soft); }
+
+      .warranty-stats { display: flex; padding: 8px 12px 18px; }
+      .warranty-stat { flex: 1; text-align: center; padding: 8px; }
+      .warranty-stat-icon { width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; }
+      .warranty-stat-value { font-size: 19px; font-weight: 700; font-family: 'Poppins', sans-serif; }
+      .warranty-stat-label { font-size: 10.5px; color: var(--text-soft); line-height: 1.3; margin-top: 3px; }
+
+      .activity-list { list-style: none; margin: 0; padding: 6px 0; }
+      .activity-item { display: flex; align-items: center; gap: 10px; padding: 9px 18px; }
+      .activity-icon { width: 26px; height: 26px; border-radius: 999px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .activity-text { flex: 1; font-size: 12.5px; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .activity-time { font-size: 10.5px; color: var(--text-soft); white-space: nowrap; flex-shrink: 0; }
+      .activity-empty { padding: 14px 18px; font-size: 12.5px; color: var(--text-soft); }
 
       .table-wrap { overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; }
       .table-wrap::-webkit-scrollbar { display: none; }
@@ -3525,6 +3668,7 @@ function GlobalStyles() {
 
       @media (max-width: 1100px) {
         .charts-row-3 { grid-template-columns: 1fr 1fr; }
+        .bottom-row { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 860px) {
         .sidebar { position: fixed; z-index: 70; height: 100vh; height: 100dvh; top: 0; left: 0; width: 240px; transform: translateX(-100%); box-shadow: 0 0 0 rgba(0,0,0,0); transition: transform 0.2s ease; }
@@ -3539,6 +3683,7 @@ function GlobalStyles() {
         .user-meta { display: none; }
         .user-chip { padding: 4px; }
         .metrics-row { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .bottom-row { grid-template-columns: 1fr; }
         .welcome-banner { padding: 16px 18px; border-radius: 14px; }
         .welcome-banner h2 { font-size: 17px; }
         .welcome-icon { width: 42px; height: 42px; border-radius: 12px; }
