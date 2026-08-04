@@ -43,13 +43,18 @@ function nextAutoTag(assets) {
 
 // Appends an entry to the audit log, tagged with who did it and when.
 // Keeps only the most recent 300 entries so it doesn't grow forever.
-function withLog(data, currentUser, message) {
+// locationId (when the action relates to a specific asset) lets Regional
+// Staff's Recent Activity / Activity Log show only their own country's
+// activity — entries with no locationId (category/location/user/backup
+// admin actions) are only ever visible to Admins anyway.
+function withLog(data, currentUser, message, locationId = null) {
   const entry = {
     id: uid("log"),
     at: new Date().toISOString(),
     userId: currentUser?.id || null,
     userName: currentUser?.name || "Unknown",
     message,
+    locationId: locationId || null,
   };
   const auditLog = [entry, ...(data.auditLog || [])].slice(0, 300);
   return { ...data, auditLog };
@@ -689,8 +694,8 @@ export default function App() {
             {view === "backup" && isAdmin && (
               <BackupView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
-            {view === "activity" && isAdmin && (
-              <ActivityLogView data={data} />
+            {view === "activity" && (
+              <ActivityLogView data={data} isAdmin={isAdmin} scopedLocationId={scopedLocationId} />
             )}
             {view === "approvals" && isAdmin && (
               <ApprovalsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
@@ -716,7 +721,9 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
       { id: "locations", label: "Locations", icon: MapPin },
       { id: "users", label: "User Accounts", icon: Users },
       { id: "backup", label: "Backup & Restore", icon: Download },
-      { id: "activity", label: "Activity Log", icon: ShieldCheck },
+    ] : []),
+    { id: "activity", label: "Activity Log", icon: ShieldCheck },
+    ...(isAdmin ? [
       { id: "approvals", label: "Approvals", icon: AlertTriangle, badge: pendingCount },
     ] : []),
   ];
@@ -980,7 +987,17 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
     return { thisMonth, next30, expired };
   }, [assets]);
 
-  const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 5), [data.auditLog]);
+  // Regional Staff should only see activity for assets in their own
+  // location/country — entries get tagged with a locationId when they're
+  // logged (see withLog call sites); anything untagged (category/location/
+  // user/backup admin actions) only ever shows for Admins, who see
+  // everything unfiltered.
+  const recentActivity = useMemo(() => {
+    const list = scopedLocationId
+      ? (data.auditLog || []).filter((l) => l.locationId === scopedLocationId)
+      : (data.auditLog || []);
+    return list.slice(0, 5);
+  }, [data.auditLog, scopedLocationId]);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -1068,7 +1085,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
         </div>
 
         <div className="panel">
-          <div className="panel-head"><h3>Recent Activity</h3><button type="button" className="panel-link" onClick={() => setView?.("reports")}>View all</button></div>
+          <div className="panel-head"><h3>Recent Activity</h3><button type="button" className="panel-link" onClick={() => setView?.("activity")}>View all</button></div>
           <ul className="activity-list">
             {recentActivity.length === 0 && <li className="activity-empty">No activity yet.</li>}
             {recentActivity.map((l) => {
@@ -1404,7 +1421,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         ...data,
         assets: data.assets.map((a) => (a.id === assetFields.id ? finalAsset : a)),
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
-      }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`);
+      }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`, finalAsset.locationId);
     } else {
       const newAsset = {
         ...assetFields,
@@ -1420,7 +1437,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         ...data,
         assets: [newAsset, ...data.assets],
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
-      }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`);
+      }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`, newAsset.locationId);
     }
     persist(next);
     setEditing(null);
@@ -1435,7 +1452,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       ...data,
       assets: data.assets.filter((a) => a.id !== id),
       maintenance: data.maintenance.filter((m) => m.assetId !== id),
-    }, currentUser, `Deleted asset "${asset?.name || asset?.tag || id}"${suffix}`);
+    }, currentUser, `Deleted asset "${asset?.name || asset?.tag || id}"${suffix}`, asset?.locationId);
     persist(next);
     setConfirmDelete(null);
     setSelected((s) => s.filter((x) => x !== id));
@@ -1510,7 +1527,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     const next = withLog({
       ...data,
       comments: [comment, ...(data.comments || [])],
-    }, currentUser, `Commented on asset "${asset?.name || asset?.tag}"`);
+    }, currentUser, `Commented on asset "${asset?.name || asset?.tag}"`, asset?.locationId);
     persist(next);
     showToast("Comment sent.");
   };
@@ -1589,7 +1606,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       assets: data.assets.map((a) => (a.id === transferTarget
         ? { ...a, locationId: destLocationId, assignedTo: newAssignedTo, transferHistory: [transferEntry, ...(a.transferHistory || [])] }
         : a)),
-    }, currentUser, logBits.join(" — "));
+    }, currentUser, logBits.join(" — "), destLocationId);
     persist(next);
     setTransferTarget(null);
     setTransferReason("");
@@ -1607,7 +1624,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       assets: data.assets.map((a) => (a.id === requestDeleteTarget
         ? { ...a, pendingDeletion: { requestedBy: currentUser.id, requestedByName: currentUser.name, reason: deleteReason.trim(), requestedAt: new Date().toISOString() } }
         : a)),
-    }, currentUser, `Requested deletion of asset "${asset?.name || asset?.tag}" — reason: ${deleteReason.trim()}`);
+    }, currentUser, `Requested deletion of asset "${asset?.name || asset?.tag}" — reason: ${deleteReason.trim()}`, asset?.locationId);
     persist(next);
     setRequestDeleteTarget(null);
     setDeleteReason("");
@@ -2550,6 +2567,12 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
   const assetIds = new Set(assetsInScope.map((a) => a.id));
   const logs = data.maintenance.filter((m) => assetIds.has(m.assetId));
 
+  // Once an entry is marked Done it moves out of the working list and into
+  // a read-only history section below — like an activity-log record, not
+  // something you keep clicking into.
+  const activeLogs = logs.filter((m) => m.status !== "Done");
+  const doneLogs = logs.filter((m) => m.status === "Done").sort((a, b) => new Date(b.date) - new Date(a.date));
+
   const [selected, setSelected] = useState([]);
 
   const assetLabel = (assetId) => data.assets.find((a) => a.id === assetId)?.name || data.assets.find((a) => a.id === assetId)?.tag || "an asset";
@@ -2620,6 +2643,7 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
       </div>
 
       <div className="panel">
+        <div className="panel-head"><h3>In Progress</h3></div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2627,8 +2651,8 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
                 <th style={{ width: 32 }}>
                   <input
                     type="checkbox"
-                    checked={logs.length > 0 && selected.length === logs.length}
-                    onChange={(e) => setSelected(e.target.checked ? logs.map((m) => m.id) : [])}
+                    checked={activeLogs.length > 0 && selected.length === activeLogs.length}
+                    onChange={(e) => setSelected(e.target.checked ? activeLogs.map((m) => m.id) : [])}
                   />
                 </th>
                 <th>Asset</th>
@@ -2640,10 +2664,10 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
               </tr>
             </thead>
             <tbody>
-              {logs.length === 0 && (
-                <tr><td colSpan={7} className="empty-cell">No maintenance entries yet — click "New Entry" to log one.</td></tr>
+              {activeLogs.length === 0 && (
+                <tr><td colSpan={7} className="empty-cell">Nothing in progress — click "New Entry" to log one.</td></tr>
               )}
-              {logs.map((m) => {
+              {activeLogs.map((m) => {
                 const asset = data.assets.find((a) => a.id === m.assetId);
                 return (
                   <tr key={m.id}>
@@ -2673,6 +2697,46 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(m)} />
                         <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(m.id)} />
                       </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-head"><h3>History (Done)</h3></div>
+        <p className="export-hint" style={{ padding: "0 18px" }}>
+          Completed entries are read-only, like an activity log — mark something
+          "Done" above and it moves here automatically.
+        </p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Asset</th>
+                <th>Description</th>
+                <th>Date</th>
+                <th>Cost</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {doneLogs.length === 0 && (
+                <tr><td colSpan={5} className="empty-cell">No completed entries yet.</td></tr>
+              )}
+              {doneLogs.map((m) => {
+                const asset = data.assets.find((a) => a.id === m.assetId);
+                return (
+                  <tr key={m.id} className="history-row">
+                    <td className="mono" data-label="Asset">{asset?.tag || "—"}</td>
+                    <td data-label="Description">{m.description}</td>
+                    <td data-label="Date">{m.date}</td>
+                    <td data-label="Cost">{m.cost ? `$${m.cost}` : "—"}</td>
+                    <td data-label="Status">
+                      <Badge color={statusColor.Done}>Done</Badge>
                     </td>
                   </tr>
                 );
@@ -3251,24 +3315,31 @@ function BackupView({ data, persist, showToast, currentUser }) {
 /* ---------------------------------------------------------
    Activity Log
 --------------------------------------------------------- */
-function ActivityLogView({ data }) {
+function ActivityLogView({ data, isAdmin, scopedLocationId }) {
   const [search, setSearch] = useState("");
   const [userFilter, setUserFilter] = useState("all");
 
+  // Regional Staff only ever see activity tagged with their own location
+  // (see withLog's locationId param) — Admins see the full, unfiltered log.
+  const scopedLog = useMemo(
+    () => (scopedLocationId ? (data.auditLog || []).filter((l) => l.locationId === scopedLocationId) : (data.auditLog || [])),
+    [data.auditLog, scopedLocationId]
+  );
+
   const userOptions = useMemo(() => {
-    const names = new Set((data.auditLog || []).map((l) => l.userName));
+    const names = new Set(scopedLog.map((l) => l.userName));
     return Array.from(names).sort();
-  }, [data.auditLog]);
+  }, [scopedLog]);
 
   const entries = useMemo(() => {
-    let list = data.auditLog || [];
+    let list = scopedLog;
     if (userFilter !== "all") list = list.filter((l) => l.userName === userFilter);
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((l) => l.message.toLowerCase().includes(q) || l.userName.toLowerCase().includes(q));
     }
     return list;
-  }, [data.auditLog, search, userFilter]);
+  }, [scopedLog, search, userFilter]);
 
   const formatWhen = (iso) => {
     const d = new Date(iso);
@@ -3292,7 +3363,9 @@ function ActivityLogView({ data }) {
       </div>
 
       <p className="export-hint">
-        Every add, edit, and delete made by any user, most recent first. Only visible to Admins.
+        {isAdmin
+          ? "Every add, edit, and delete made by any user, most recent first."
+          : "Activity for assets in your location, most recent first."}
       </p>
 
       <div className="panel">
@@ -3593,6 +3666,8 @@ function GlobalStyles() {
       tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
       .asset-row { cursor: pointer; }
       .asset-row .checkbox-cell { cursor: default; }
+      .history-row { cursor: default; opacity: 0.75; }
+      .history-row:hover { background: transparent !important; }
       .empty-cell { text-align: center; color: var(--text-soft); padding: 28px !important; white-space: normal; }
 
       .badge { padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; display: inline-block; }
