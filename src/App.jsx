@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, User, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  KeyRound, ShieldCheck, AlertTriangle, Info, DollarSign,
+  KeyRound, ShieldCheck, AlertTriangle, Info,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
 } from "lucide-react";
@@ -1033,7 +1033,6 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
         <Metric label="In Use" value={totals.inUse} sub={`${pct(totals.inUse)}% of all assets`} icon={CheckSquare} color={STATUS_COLORS["In Use"]} />
         <Metric label="In Stock" value={totals.inStock} sub={`${pct(totals.inStock)}% of all assets`} icon={Archive} color={STATUS_COLORS["In Stock"]} />
         <Metric label="Under Repair" value={totals.underRepair} sub={`${pct(totals.underRepair)}% of all assets`} icon={Wrench} color={STATUS_COLORS["Under Repair"]} />
-        <Metric label="Total Asset Value" value={`$${totals.value.toLocaleString()}`} sub="Total purchase cost on record" icon={DollarSign} color="#0EA5E9" />
       </div>
 
       <div className={`charts-row ${isAdmin ? "charts-row-3" : ""}`}>
@@ -1308,6 +1307,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [selected, setSelected] = useState([]);
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
   const [maintPromptAsset, setMaintPromptAsset] = useState(null); // asset awaiting maintenance details before going Under Repair
+  const [inUsePromptAsset, setInUsePromptAsset] = useState(null); // asset awaiting department/assigned user before going In Use
+  const [inUseDepartment, setInUseDepartment] = useState("");
+  const [inUseAssignedTo, setInUseAssignedTo] = useState("");
   const [bulkDeleteText, setBulkDeleteText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
@@ -1467,10 +1469,20 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   // logging a generic maintenance entry, it pops up the maintenance form
   // so whoever's doing this can say *why*; the status only actually
   // changes once that form is saved (see submitRepairMaintenance below).
+  // In Use is also a special case — it pops up a small form to capture
+  // who it's now with, since that's normally the whole point of marking
+  // something In Use; the status only actually changes once that's saved
+  // (see submitInUseAssignment below).
   const quickStatusChange = async (asset, newStatus) => {
     if (newStatus === asset.status) return;
     if (newStatus === "Under Repair") {
       setMaintPromptAsset(asset);
+      return;
+    }
+    if (newStatus === "In Use") {
+      setInUseDepartment(asset.department || "");
+      setInUseAssignedTo(asset.assignedTo || "");
+      setInUsePromptAsset(asset);
       return;
     }
     let finalAsset = { ...asset, status: newStatus };
@@ -1481,6 +1493,24 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
     }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${newStatus}"`, finalAsset.locationId);
     persist(next);
+    showToast("Status updated.");
+  };
+
+  // Saves the department/assigned-user details collected from the In Use
+  // popup, and only now actually flips the asset's status — cancelling
+  // that popup leaves the asset untouched.
+  const submitInUseAssignment = () => {
+    const asset = inUsePromptAsset;
+    if (!asset) return;
+    let finalAsset = { ...asset, status: "In Use", department: inUseDepartment, assignedTo: inUseAssignedTo };
+    if (asset.status === "Under Repair") finalAsset.preRepairStatus = null;
+    finalAsset = applyStatusSideEffects(finalAsset);
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "In Use"`, finalAsset.locationId);
+    persist(next);
+    setInUsePromptAsset(null);
     showToast("Status updated.");
   };
 
@@ -1933,6 +1963,35 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
             onSave={submitRepairMaintenance}
             onClose={() => setMaintPromptAsset(null)}
           />
+        </Modal>
+      )}
+      {inUsePromptAsset && (
+        <Modal title={`Mark In Use — ${inUsePromptAsset.tag}`} onClose={() => setInUsePromptAsset(null)} width={480}>
+          <div className="form-full hint-box" style={{ marginBottom: 14 }}>
+            This asset will be marked In Use once you save who it's with.
+          </div>
+          <div className="form-grid">
+            <Field label="Department">
+              <SearchableSelect
+                value={inUseDepartment}
+                onChange={setInUseDepartment}
+                options={departmentOptions.map((v) => ({ value: v, label: v }))}
+                placeholder="Search or type a department"
+              />
+            </Field>
+            <Field label="Assigned To">
+              <SearchableSelect
+                value={inUseAssignedTo}
+                onChange={setInUseAssignedTo}
+                options={Array.from(new Set(data.assets.map((a) => a.assignedTo).filter(Boolean))).sort().map((v) => ({ value: v, label: v }))}
+                placeholder="Search or type a name"
+              />
+            </Field>
+          </div>
+          <div className="form-full modal-actions">
+            <button type="button" className="btn ghost" onClick={() => setInUsePromptAsset(null)}>Cancel</button>
+            <button type="button" className="btn primary" onClick={submitInUseAssignment}>Save</button>
+          </div>
         </Modal>
       )}
       {bulkDeleteConfirmOpen && (
