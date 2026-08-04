@@ -70,12 +70,18 @@ function markUnderRepair(assets, assetId) {
   });
 }
 
-// When an asset is marked Retired or Disposed, it's no longer in active
-// service — clear the fields that only make sense for something still in
-// use, so old assignment/department data doesn't linger on a dead record.
-function applyRetiredDefaults(asset) {
-  if (asset.status !== "Retired" && asset.status !== "Disposed") return asset;
-  return { ...asset, assignedTo: "", condition: "Poor", department: "" };
+// Certain status changes imply the asset is no longer with anyone, so we
+// clear the fields that only make sense for something actively assigned —
+// Retired/Disposed also drop condition to Poor since it's no longer in
+// service at all, while In Stock just means it's back on the shelf.
+function applyStatusSideEffects(asset) {
+  if (asset.status === "Retired" || asset.status === "Disposed") {
+    return { ...asset, assignedTo: "", condition: "Poor", department: "" };
+  }
+  if (asset.status === "In Stock") {
+    return { ...asset, assignedTo: "", department: "" };
+  }
+  return asset;
 }
 
 // After a maintenance entry is closed/removed, checks whether the asset
@@ -1301,6 +1307,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [deleteReason, setDeleteReason] = useState("");
   const [selected, setSelected] = useState([]);
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
+  const [maintPromptAsset, setMaintPromptAsset] = useState(null); // asset awaiting maintenance details before going Under Repair
   const [bulkDeleteText, setBulkDeleteText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
@@ -1426,7 +1433,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       } else if (assetFields.status !== "Under Repair" && prev?.status === "Under Repair") {
         finalAsset = { ...assetFields, preRepairStatus: null };
       }
-      finalAsset = applyRetiredDefaults(finalAsset);
+      finalAsset = applyStatusSideEffects(finalAsset);
       next = withLog({
         ...data,
         assets: data.assets.map((a) => (a.id === assetFields.id ? finalAsset : a)),
@@ -1443,7 +1450,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       if (newAsset.status === "Under Repair") {
         autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       }
-      newAsset = applyRetiredDefaults(newAsset);
+      newAsset = applyStatusSideEffects(newAsset);
       next = withLog({
         ...data,
         assets: [newAsset, ...data.assets],
@@ -1456,26 +1463,43 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   };
 
   // Quick status change straight from the table row, without opening the
-  // full Edit form — mirrors the same Under-Repair / Retired-Disposed
-  // side-effects that a full edit would apply.
+  // full Edit form. Under Repair is a special case — instead of silently
+  // logging a generic maintenance entry, it pops up the maintenance form
+  // so whoever's doing this can say *why*; the status only actually
+  // changes once that form is saved (see submitRepairMaintenance below).
   const quickStatusChange = async (asset, newStatus) => {
     if (newStatus === asset.status) return;
-    let finalAsset = { ...asset, status: newStatus };
-    let autoMaint = null;
-    if (newStatus === "Under Repair" && asset.status !== "Under Repair") {
-      finalAsset.preRepairStatus = asset.status;
-      autoMaint = { id: uid("maint"), assetId: asset.id, description: "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
-    } else if (newStatus !== "Under Repair" && asset.status === "Under Repair") {
-      finalAsset.preRepairStatus = null;
+    if (newStatus === "Under Repair") {
+      setMaintPromptAsset(asset);
+      return;
     }
-    finalAsset = applyRetiredDefaults(finalAsset);
+    let finalAsset = { ...asset, status: newStatus };
+    if (asset.status === "Under Repair") finalAsset.preRepairStatus = null;
+    finalAsset = applyStatusSideEffects(finalAsset);
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
-      maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
-    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${newStatus}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`, finalAsset.locationId);
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${newStatus}"`, finalAsset.locationId);
     persist(next);
-    showToast(autoMaint ? "Status updated — added to Maintenance." : "Status updated.");
+    showToast("Status updated.");
+  };
+
+  // Saves the maintenance entry collected from the Under Repair popup, and
+  // only now actually flips the asset's status — cancelling that popup
+  // leaves the asset untouched.
+  const submitRepairMaintenance = (entry) => {
+    const asset = maintPromptAsset;
+    if (!asset) return;
+    const newEntry = { ...entry, id: uid("maint"), assetId: asset.id };
+    const finalAsset = { ...asset, status: "Under Repair", preRepairStatus: asset.status };
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
+      maintenance: [newEntry, ...data.maintenance],
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "Under Repair" — added maintenance entry`, finalAsset.locationId);
+    persist(next);
+    setMaintPromptAsset(null);
+    showToast("Status updated — added to Maintenance.");
   };
 
   const remove = async (id) => {
@@ -1806,7 +1830,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
                 <SortTh label="Assigned User" sortKey="assignedTo" />
                 <SortTh label="Status" sortKey="status" />
                 <SortTh label="Condition" sortKey="condition" />
-                <th style={{ width: 132 }}></th>
+                <th className="actions-th" style={{ width: 150 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -1897,6 +1921,19 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => remove(confirmDelete)}
         />
+      )}
+      {maintPromptAsset && (
+        <Modal title={`Log Repair — ${maintPromptAsset.tag}`} onClose={() => setMaintPromptAsset(null)} width={760}>
+          <div className="form-full hint-box" style={{ marginBottom: 14 }}>
+            This asset will be marked Under Repair once you save these details — they're added to Service &amp; Maintenance.
+          </div>
+          <MaintForm
+            entry={emptyMaint(maintPromptAsset.id)}
+            assets={[maintPromptAsset]}
+            onSave={submitRepairMaintenance}
+            onClose={() => setMaintPromptAsset(null)}
+          />
+        </Modal>
       )}
       {bulkDeleteConfirmOpen && (
         <TypeToConfirmDialog
@@ -3741,6 +3778,14 @@ function GlobalStyles() {
       .history-row:hover { background: transparent !important; }
       .empty-cell { text-align: center; color: var(--text-soft); padding: 28px !important; white-space: normal; }
 
+      /* Keep row quick-actions reachable without horizontal scrolling on
+         wide tables — pinned to the right edge of the table, above the
+         other cells as the table scrolls under it. */
+      .actions-th, td.actions-cell { position: sticky; right: 0; z-index: 3; }
+      .actions-th { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+      td.actions-cell { background: var(--surface); }
+      tbody tr:hover td.actions-cell { background: color-mix(in srgb, var(--accent) 4%, var(--surface)); }
+
       .badge { padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; display: inline-block; }
       .status-select { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 4px 10px; background: var(--surface); border: 1px solid; }
 
@@ -3928,7 +3973,7 @@ function GlobalStyles() {
         }
         .table-wrap td:not([data-label]) { justify-content: flex-end; }
         .table-wrap td.checkbox-cell { justify-content: flex-start; }
-        .table-wrap td.actions-cell { justify-content: flex-end; }
+        .table-wrap td.actions-cell { justify-content: flex-end; position: static; }
         .row-actions { flex-wrap: wrap; justify-content: flex-end; }
       }
 
