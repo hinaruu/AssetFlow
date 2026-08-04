@@ -13,8 +13,8 @@ export default defineConfig({
       injectRegister: false,
       includeAssets: ['icon-192.png', 'icon-512.png'],
       manifest: {
-        name: 'Asset Manager',
-        short_name: 'Assets',
+        name: 'AssetHub',
+        short_name: 'AssetHub',
         description: 'Asset tracking and management app',
         theme_color: '#3B82F6',
         background_color: '#ffffff',

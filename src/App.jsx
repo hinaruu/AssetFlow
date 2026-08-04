@@ -70,6 +70,14 @@ function markUnderRepair(assets, assetId) {
   });
 }
 
+// When an asset is marked Retired or Disposed, it's no longer in active
+// service — clear the fields that only make sense for something still in
+// use, so old assignment/department data doesn't linger on a dead record.
+function applyRetiredDefaults(asset) {
+  if (asset.status !== "Retired" && asset.status !== "Disposed") return asset;
+  return { ...asset, assignedTo: "", condition: "Poor", department: "" };
+}
+
 // After a maintenance entry is closed/removed, checks whether the asset
 // still has other open (non-"Done") maintenance entries. If not, restores
 // its pre-repair status.
@@ -354,7 +362,7 @@ function Modal({ title, onClose, children, width = 480 }) {
   );
 }
 
-function ConfirmDialog({ message, onCancel, onConfirm }) {
+function ConfirmDialog({ message, onCancel, onConfirm, confirmLabel = "Delete" }) {
   return (
     <div className="modal-overlay" onClick={onCancel}>
       <div className="modal confirm" onClick={(e) => e.stopPropagation()}>
@@ -362,7 +370,7 @@ function ConfirmDialog({ message, onCancel, onConfirm }) {
         <p>{message}</p>
         <div className="confirm-actions">
           <button className="btn ghost" onClick={onCancel}>Cancel</button>
-          <button className="btn danger" onClick={onConfirm}>Delete</button>
+          <button className="btn danger" onClick={onConfirm}>{confirmLabel}</button>
         </div>
       </div>
     </div>
@@ -454,7 +462,7 @@ function LoginScreen({ users, onLogin }) {
       <div className="login-card">
         <div className="login-logo">
           <span className="brand-badge"><ShieldCheck size={18} /></span>
-          <span>Astuto Assets</span>
+          <span>AssetHub</span>
         </div>
         <p className="login-sub">Sign in to manage IT &amp; facility assets.</p>
         <div onKeyDown={(e) => { if (e.key === "Enter") submit(e); }}>
@@ -732,7 +740,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
       {open && <div className="sidebar-backdrop" onClick={onToggle} />}
       <div className={`sidebar ${open ? "" : "collapsed"}`}>
         <div className="sidebar-top">
-          {open && <div className="brand"><span className="brand-badge"><ShieldCheck size={16} /></span><span>Astuto Assets</span></div>}
+          {open && <div className="brand"><span className="brand-badge"><ShieldCheck size={16} /></span><span>AssetHub</span></div>}
           {!open && <div className="brand-mini"><span className="brand-badge"><ShieldCheck size={16} /></span></div>}
         </div>
         <nav>
@@ -877,7 +885,8 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
       </div>
       {confirmLogoutOpen && (
         <ConfirmDialog
-          message="Sign out of Asset Manager?"
+          message="Sign out of AssetHub?"
+          confirmLabel="Yes"
           onCancel={() => setConfirmLogoutOpen(false)}
           onConfirm={() => { setConfirmLogoutOpen(false); onLogout(); }}
         />
@@ -1417,13 +1426,14 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       } else if (assetFields.status !== "Under Repair" && prev?.status === "Under Repair") {
         finalAsset = { ...assetFields, preRepairStatus: null };
       }
+      finalAsset = applyRetiredDefaults(finalAsset);
       next = withLog({
         ...data,
         assets: data.assets.map((a) => (a.id === assetFields.id ? finalAsset : a)),
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
       }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`, finalAsset.locationId);
     } else {
-      const newAsset = {
+      let newAsset = {
         ...assetFields,
         id: uid("ast"),
         tag: String(assetFields.tag || "").trim() || nextAutoTag(data.assets),
@@ -1433,6 +1443,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       if (newAsset.status === "Under Repair") {
         autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       }
+      newAsset = applyRetiredDefaults(newAsset);
       next = withLog({
         ...data,
         assets: [newAsset, ...data.assets],
@@ -1889,6 +1900,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           locations={data.locations}
           isAdmin={isAdmin}
           comments={(data.comments || []).filter((c) => c.assetId === viewing.id)}
+          maintenance={data.maintenance.filter((m) => m.assetId === viewing.id)}
           currentUser={currentUser}
           onAddComment={(message) => addComment(viewing.id, message)}
           onClose={() => setViewing(null)}
@@ -2409,10 +2421,14 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, isAdmin, comments, currentUser, onAddComment, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, comments, maintenance, currentUser, onAddComment, onClose, onEdit, onDuplicate, onTransfer, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const [commentText, setCommentText] = useState("");
+  // Most recent maintenance first, so the newest work on this device is
+  // what you see right away.
+  const maintHistory = [...(maintenance || [])].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const maintStatusColor = { "Not Started": "#9CA3AF", "In Progress": "#F59E0B", "Done": "#10B981" };
   // Chronological order, oldest first, like a chat thread. Whoever started
   // the conversation on this asset anchors to the left; anyone else who
   // replies shows up on the right — a simple two-side chat layout.
@@ -2484,6 +2500,24 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, cur
         <div className="notes-highlight">
           {asset.notes || "No notes yet."}
         </div>
+      </div>
+
+      <div className="detail-full">
+        <div className="notif-section-title" style={{ marginTop: 14 }}>Service &amp; Maintenance History</div>
+        {maintHistory.length === 0 ? (
+          <div className="notif-empty">No maintenance history yet for this asset.</div>
+        ) : (
+          <ul className="maint-history-list">
+            {maintHistory.map((m) => (
+              <li key={m.id} className="maint-history-item">
+                <span className="maint-history-date">{m.date}</span>
+                <span className="maint-history-desc">{m.description}</span>
+                {m.cost ? <span className="maint-history-cost">${m.cost}</span> : null}
+                <Badge color={maintStatusColor[m.status] || "#6B7280"}>{m.status}</Badge>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="detail-full comments-section">
@@ -3570,6 +3604,12 @@ function GlobalStyles() {
       .detail-transfer-history { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 
       .notes-highlight { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+
+      .maint-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+      .maint-history-item { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
+      .maint-history-date { color: var(--text-soft); font-family: ui-monospace, monospace; font-size: 12px; white-space: nowrap; }
+      .maint-history-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .maint-history-cost { color: var(--text-soft); white-space: nowrap; }
 
       .comments-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
       .comment-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; padding: 4px 2px; }
