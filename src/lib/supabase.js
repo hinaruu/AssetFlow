@@ -67,6 +67,10 @@ const TABLES = {
       next_calibration_date: a.nextCalibrationDate || null,
       notes: a.notes || null, pre_repair_status: a.preRepairStatus || null,
       transfer_history: a.transferHistory || [],
+      disposed_by: a.disposalInfo?.by || null,
+      disposal_reason: a.disposalInfo?.reason || null,
+      disposed_at: a.disposalInfo?.date || null,
+      disposal_logged_at: a.disposalInfo?.at || null,
       created_by_id: a.createdById || null, created_by_name: a.createdByName || null,
       pending_deletion: a.pendingDeletion || null,
       updated_at: new Date().toISOString(),
@@ -79,6 +83,9 @@ const TABLES = {
       requiresCalibration: r.requires_calibration, calibrationDate: r.calibration_date,
       nextCalibrationDate: r.next_calibration_date, notes: r.notes,
       preRepairStatus: r.pre_repair_status, transferHistory: r.transfer_history || [],
+      disposalInfo: r.disposed_by || r.disposal_reason || r.disposed_at
+        ? { by: r.disposed_by, reason: r.disposal_reason, date: r.disposed_at, at: r.disposal_logged_at }
+        : null,
       createdById: r.created_by_id, createdByName: r.created_by_name,
       pendingDeletion: r.pending_deletion || null,
     }),

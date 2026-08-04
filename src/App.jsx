@@ -78,10 +78,13 @@ function applyStatusSideEffects(asset) {
   if (asset.status === "Retired" || asset.status === "Disposed") {
     return { ...asset, assignedTo: "", condition: "Poor", department: "" };
   }
+  // Any other status means the asset is back in active service — clear
+  // disposal details left over from a previous Retired/Disposed period.
+  const cleared = asset.disposalInfo ? { ...asset, disposalInfo: null } : asset;
   if (asset.status === "In Stock") {
-    return { ...asset, assignedTo: "", department: "" };
+    return { ...cleared, assignedTo: "", department: "" };
   }
-  return asset;
+  return cleared;
 }
 
 // After a maintenance entry is closed/removed, checks whether the asset
@@ -99,7 +102,8 @@ function maybeRestoreStatus(assets, maintenance, assetId) {
 // notification bell — warranty expiring (IT) and calibration due (Non-IT),
 // within the next 30 days or already overdue.
 function computeAlerts(assets, scopedLocationId) {
-  const list = scopedLocationId ? assets.filter((a) => a.locationId === scopedLocationId) : assets;
+  let list = scopedLocationId ? assets.filter((a) => a.locationId === scopedLocationId) : assets;
+  list = list.filter((a) => a.status !== "Retired" && a.status !== "Disposed");
   const now = new Date();
   const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
   const alerts = [];
@@ -182,6 +186,10 @@ function parseCell(value, fallback) {
 }
 
 const CONDITION_OPTIONS = ["New", "Good", "Fair", "Poor"];
+const DISPOSAL_REASON_OPTIONS = [
+  "End of Life (EOL)", "Hardware failure", "Motherboard failure", "Damaged beyond repair",
+  "Lost / Stolen", "Obsolete / Replaced", "Other",
+];
 const MAINT_STATUS = ["Not Started", "In Progress", "Done"];
 
 const STATUS_COLORS = {
@@ -941,9 +949,12 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
 --------------------------------------------------------- */
 function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   const isAdmin = currentUser?.role === "Admin";
-  const assets = scopedLocationId
+  // Retired/Disposed assets are excluded from every dashboard figure below —
+  // they're historical records, not part of the active fleet being measured.
+  const assets = (scopedLocationId
     ? data.assets.filter((a) => a.locationId === scopedLocationId)
-    : data.assets;
+    : data.assets
+  ).filter((a) => a.status !== "Retired" && a.status !== "Disposed");
 
   const statusData = useMemo(() => {
     const counts = {};
@@ -967,7 +978,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   const locationData = useMemo(() => {
     if (!isAdmin) return [];
     const counts = {};
-    data.assets.forEach((a) => {
+    data.assets.filter((a) => a.status !== "Retired" && a.status !== "Disposed").forEach((a) => {
       const loc = data.locations.find((l) => l.id === a.locationId);
       const name = loc ? loc.name : "Unassigned";
       counts[name] = (counts[name] || 0) + 1;
@@ -1320,7 +1331,7 @@ function emptyAsset(defaultLocationId) {
     yearModel: "", serial: "", status: "", condition: "New", locationId: defaultLocationId || "",
     assignedTo: "", purchaseDate: "", purchaseCost: "", warrantyExpiry: "",
     requiresCalibration: false, calibrationDate: "", nextCalibrationDate: "",
-    notes: "", transferHistory: [], department: "",
+    notes: "", transferHistory: [], department: "", disposalInfo: null,
   };
 }
 
@@ -1401,6 +1412,11 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   const [inUseDepartment, setInUseDepartment] = useState("");
   const [inUseAssignedTo, setInUseAssignedTo] = useState("");
   const [inUseLocationId, setInUseLocationId] = useState("");
+  const [disposePromptAsset, setDisposePromptAsset] = useState(null); // asset awaiting disposal details before going Retired/Disposed
+  const [disposeTargetStatus, setDisposeTargetStatus] = useState("Disposed"); // "Retired" or "Disposed"
+  const [disposedBy, setDisposedBy] = useState("");
+  const [disposeReason, setDisposeReason] = useState("");
+  const [disposeDate, setDisposeDate] = useState("");
   const [bulkDeleteText, setBulkDeleteText] = useState("");
   const [transferTarget, setTransferTarget] = useState(null); // asset id
   const [transferLocationId, setTransferLocationId] = useState("");
@@ -1456,20 +1472,38 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
   }, [categoryOptions, categoryFilter]);
 
+  // Retired/Disposed assets are kept for records but shouldn't clutter the
+  // everyday working view — "All assets" (and every other preset except the
+  // dedicated one below) only ever looks at assets still in active use.
+  const activeAssetsBase = useMemo(
+    () => scopedAssetsBase.filter((a) => a.status !== "Retired" && a.status !== "Disposed"),
+    [scopedAssetsBase]
+  );
+  const disposedAssetsBase = useMemo(
+    () => scopedAssetsBase.filter((a) => a.status === "Retired" || a.status === "Disposed"),
+    [scopedAssetsBase]
+  );
+
   // Quick-filter presets — one-tap shortcuts for the views managers check
   // most often, built from data already computed above (status + the same
   // alert map the table's warning icons use) rather than new tracking.
   const presetOptions = useMemo(() => {
-    const underRepairCount = scopedAssetsBase.filter((a) => a.status === "Under Repair").length;
-    const needsAttentionCount = scopedAssetsBase.filter((a) => assetAlertMap.has(a.id)).length;
-    const pendingApprovalCount = scopedAssetsBase.filter((a) => !!a.pendingDeletion).length;
+    const inStockCount = activeAssetsBase.filter((a) => a.status === "In Stock").length;
+    const inUseCount = activeAssetsBase.filter((a) => a.status === "In Use").length;
+    const underRepairCount = activeAssetsBase.filter((a) => a.status === "Under Repair").length;
+    const needsAttentionCount = activeAssetsBase.filter((a) => assetAlertMap.has(a.id)).length;
+    const pendingApprovalCount = activeAssetsBase.filter((a) => !!a.pendingDeletion).length;
+    const retiredDisposedCount = disposedAssetsBase.length;
     return [
       { id: "all", label: "All assets", color: null },
+      { id: "inStock", label: "In Stock", count: inStockCount, color: STATUS_COLORS["In Stock"] },
+      { id: "inUse", label: "In Use", count: inUseCount, color: STATUS_COLORS["In Use"] },
       { id: "underRepair", label: "Under repair", count: underRepairCount, color: STATUS_COLORS["Under Repair"] },
       { id: "needsAttention", label: "Needs attention", count: needsAttentionCount, color: "#EF4444" },
       ...(isAdmin ? [{ id: "pendingApproval", label: "Pending approval", count: pendingApprovalCount, color: "#8B5CF6" }] : []),
+      { id: "retiredDisposed", label: "Retired / Disposed", count: retiredDisposedCount, color: STATUS_COLORS["Disposed"] },
     ].filter((p) => p.id === "all" || p.count > 0 || presetFilter === p.id);
-  }, [scopedAssetsBase, assetAlertMap, isAdmin, presetFilter]);
+  }, [activeAssetsBase, disposedAssetsBase, assetAlertMap, isAdmin, presetFilter]);
 
   // If the active preset's items all get resolved (e.g. every repair is
   // closed out) and the chip disappears, fall back to "all" instead of
@@ -1481,8 +1515,10 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   }, [presetOptions, presetFilter]);
 
   const visibleAssets = useMemo(() => {
-    let list = scopedAssetsBase;
-    if (presetFilter === "underRepair") list = list.filter((a) => a.status === "Under Repair");
+    let list = presetFilter === "retiredDisposed" ? disposedAssetsBase : activeAssetsBase;
+    if (presetFilter === "inStock") list = list.filter((a) => a.status === "In Stock");
+    else if (presetFilter === "inUse") list = list.filter((a) => a.status === "In Use");
+    else if (presetFilter === "underRepair") list = list.filter((a) => a.status === "Under Repair");
     else if (presetFilter === "needsAttention") list = list.filter((a) => assetAlertMap.has(a.id));
     else if (presetFilter === "pendingApproval") list = list.filter((a) => !!a.pendingDeletion);
     if (locationFilter !== "all") list = list.filter((a) => a.locationId === locationFilter);
@@ -1501,7 +1537,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       });
     }
     return list;
-  }, [scopedAssetsBase, data.locations, data.categories, search, locationFilter, categoryFilter, userFilter, presetFilter, assetAlertMap]);
+  }, [activeAssetsBase, disposedAssetsBase, data.locations, data.categories, search, locationFilter, categoryFilter, userFilter, presetFilter, assetAlertMap]);
 
   const sortedAssets = useMemo(() => {
     if (!sort.key) return visibleAssets;
@@ -1541,17 +1577,27 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   );
 
   const save = async (asset) => {
-    const { repairReason, _lockLocationField, ...assetFields } = asset;
+    const { repairReason, disposalBy, disposalReason, disposalDate, _lockLocationField, ...assetFields } = asset;
+    const buildDisposalInfo = () => ({
+      by: (disposalBy || currentUser.name).trim() || currentUser.name,
+      reason: (disposalReason || "").trim(),
+      date: disposalDate || todayISO(),
+      at: new Date().toISOString(),
+    });
     let next;
     let autoMaint = null;
     if (assetFields.id) {
       const prev = data.assets.find((a) => a.id === assetFields.id);
+      const prevWasDisposed = prev?.status === "Retired" || prev?.status === "Disposed";
       let finalAsset = assetFields;
       if (assetFields.status === "Under Repair" && prev?.status !== "Under Repair") {
         finalAsset = { ...assetFields, preRepairStatus: prev?.status || "In Use" };
         autoMaint = { id: uid("maint"), assetId: assetFields.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       } else if (assetFields.status !== "Under Repair" && prev?.status === "Under Repair") {
         finalAsset = { ...assetFields, preRepairStatus: null };
+      }
+      if ((assetFields.status === "Retired" || assetFields.status === "Disposed") && !prevWasDisposed) {
+        finalAsset = { ...finalAsset, disposalInfo: buildDisposalInfo() };
       }
       finalAsset = applyStatusSideEffects(finalAsset);
       next = withLog({
@@ -1569,6 +1615,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       };
       if (newAsset.status === "Under Repair") {
         autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
+      }
+      if (newAsset.status === "Retired" || newAsset.status === "Disposed") {
+        newAsset = { ...newAsset, disposalInfo: buildDisposalInfo() };
       }
       newAsset = applyStatusSideEffects(newAsset);
       next = withLog({
@@ -1590,9 +1639,18 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
   // In Use is also a special case — it pops up a small form to capture
   // who it's now with, since that's normally the whole point of marking
   // something In Use; the status only actually changes once that's saved
-  // (see submitInUseAssignment below).
+  // (see submitInUseAssignment below). Retired/Disposed is the same idea —
+  // it pops up a form for the disposal details; the status only actually
+  // changes once that form is saved (see submitDisposal below).
   const quickStatusChange = async (asset, newStatus) => {
     if (newStatus === asset.status) return;
+    const wasDisposedAsset = asset.status === "Retired" || asset.status === "Disposed";
+    if (wasDisposedAsset) {
+      const ok = window.confirm(
+        `This asset is currently marked "${asset.status}". Changing its status to "${newStatus}" will restore it to active use and clear its disposal record. Continue?`
+      );
+      if (!ok) return;
+    }
     if (newStatus === "Under Repair") {
       setMaintPromptAsset(asset);
       return;
@@ -1602,6 +1660,14 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       setInUseAssignedTo(asset.assignedTo || "");
       setInUseLocationId(asset.locationId || "");
       setInUsePromptAsset(asset);
+      return;
+    }
+    if (newStatus === "Retired" || newStatus === "Disposed") {
+      setDisposeTargetStatus(newStatus);
+      setDisposedBy(currentUser.name || "");
+      setDisposeReason("");
+      setDisposeDate(todayISO());
+      setDisposePromptAsset(asset);
       return;
     }
     let finalAsset = { ...asset, status: newStatus };
@@ -1633,6 +1699,34 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast("Status updated.");
   };
 
+  // Saves the disposal details collected from the Retired/Disposed popup,
+  // and only now actually flips the asset's status — cancelling that popup
+  // leaves the asset untouched.
+  const submitDisposal = () => {
+    const asset = disposePromptAsset;
+    if (!asset) return;
+    if (!disposeReason.trim()) { alert("Please select or enter a reason."); return; }
+    let finalAsset = {
+      ...asset,
+      status: disposeTargetStatus,
+      disposalInfo: {
+        by: disposedBy.trim() || currentUser.name,
+        reason: disposeReason.trim(),
+        date: disposeDate || todayISO(),
+        at: new Date().toISOString(),
+      },
+    };
+    if (asset.status === "Under Repair") finalAsset.preRepairStatus = null;
+    finalAsset = applyStatusSideEffects(finalAsset);
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${disposeTargetStatus}" — reason: ${disposeReason.trim()}`, finalAsset.locationId);
+    persist(next);
+    setDisposePromptAsset(null);
+    showToast("Status updated.");
+  };
+
   // Saves the maintenance entry collected from the Under Repair popup, and
   // only now actually flips the asset's status — cancelling that popup
   // leaves the asset untouched.
@@ -1640,7 +1734,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     const asset = maintPromptAsset;
     if (!asset) return;
     const newEntry = { ...entry, id: uid("maint"), assetId: asset.id };
-    const finalAsset = { ...asset, status: "Under Repair", preRepairStatus: asset.status };
+    const finalAsset = { ...asset, status: "Under Repair", preRepairStatus: asset.status, disposalInfo: null };
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
@@ -1755,6 +1849,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       assignedTo: "",
       status: "In Stock",
       transferHistory: [],
+      disposalInfo: null,
       // Non-admins can't relocate a duplicated asset — it always starts
       // in their own assigned location, and the field is locked in the
       // modal below. Admins keep full control over the location.
@@ -1905,6 +2000,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           nextCalibrationDate: row.nextCalibrationDate || "",
           notes: "",
           transferHistory: [],
+          disposalInfo: null,
         };
       });
       persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via Excel`));
@@ -2098,6 +2194,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           scopedLocationId={scopedLocationId}
           existingAssets={data.assets}
           departmentOptions={departmentOptions}
+          currentUser={currentUser}
           onClose={() => setEditing(null)}
           onSave={save}
         />
@@ -2157,6 +2254,33 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           <div className="form-full modal-actions">
             <button type="button" className="btn ghost" onClick={() => setInUsePromptAsset(null)}>Cancel</button>
             <button type="button" className="btn primary" onClick={submitInUseAssignment}>Save</button>
+          </div>
+        </Modal>
+      )}
+      {disposePromptAsset && (
+        <Modal title={`Mark ${disposeTargetStatus} — ${disposePromptAsset.tag}`} onClose={() => setDisposePromptAsset(null)} width={480}>
+          <div className="form-full hint-box" style={{ marginBottom: 14 }}>
+            This asset will be marked {disposeTargetStatus} once you save these details.
+          </div>
+          <div className="form-grid">
+            <Field label="Disposed By" required>
+              <input value={disposedBy} onChange={(e) => setDisposedBy(e.target.value)} placeholder="Name of person handling disposal" />
+            </Field>
+            <Field label="Reason" required>
+              <SearchableSelect
+                value={disposeReason}
+                onChange={setDisposeReason}
+                options={DISPOSAL_REASON_OPTIONS.map((v) => ({ value: v, label: v }))}
+                placeholder="Search or type a reason"
+              />
+            </Field>
+            <Field label={`Date of ${disposeTargetStatus === "Retired" ? "Retirement" : "Disposal"}`} required>
+              <input type="date" value={disposeDate} onChange={(e) => setDisposeDate(e.target.value)} />
+            </Field>
+          </div>
+          <div className="form-full modal-actions">
+            <button type="button" className="btn ghost" onClick={() => setDisposePromptAsset(null)}>Cancel</button>
+            <button type="button" className="btn primary" onClick={submitDisposal}>Save</button>
           </div>
         </Modal>
       )}
@@ -2413,7 +2537,7 @@ function SearchableSelect({ value, onChange, options, placeholder = "Search…",
   );
 }
 
-function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, departmentOptions, onClose, onSave }) {
+function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, existingAssets, departmentOptions, currentUser, onClose, onSave }) {
   const [form, setForm] = useState(asset);
   const [hasPurchaseInfo, setHasPurchaseInfo] = useState(!!(asset.purchaseDate || asset.purchaseCost));
   const [hasWarrantyExpiry, setHasWarrantyExpiry] = useState(!!(asset.warrantyExpiry && asset.warrantyExpiry !== "N/A"));
@@ -2432,6 +2556,9 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 
   const wasUnderRepair = asset.status === "Under Repair";
   const needsReason = form.status === "Under Repair" && !wasUnderRepair;
+
+  const wasDisposed = asset.status === "Retired" || asset.status === "Disposed";
+  const needsDisposalReason = (form.status === "Retired" || form.status === "Disposed") && !wasDisposed;
 
   const brandOptions = useMemo(() => {
     const brandSet = new Set((existingAssets || []).map((a) => a.brand).filter(Boolean));
@@ -2515,6 +2642,16 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
     if (needsReason && !(form.repairReason || "").trim()) {
       alert("Please enter a reason — this creates the matching Maintenance entry.");
       return;
+    }
+    if (needsDisposalReason && !(form.disposalReason || "").trim()) {
+      alert(`Please select or enter a reason for marking this asset "${form.status}".`);
+      return;
+    }
+    if (wasDisposed && form.status !== "Retired" && form.status !== "Disposed") {
+      const ok = window.confirm(
+        `This asset is currently marked "${asset.status}". Changing its status to "${form.status}" will restore it to active use and clear its disposal record. Continue?`
+      );
+      if (!ok) return;
     }
     onSave({
       ...form,
@@ -2616,6 +2753,35 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
                   placeholder="What's wrong with it? This becomes the Maintenance entry."
                 />
               </Field>
+            </div>
+          )}
+
+          {needsDisposalReason && (
+            <div className="form-full repair-reason-box">
+              <div className="form-grid">
+                <Field label="Disposed By">
+                  <input
+                    value={form.disposalBy ?? (currentUser?.name || "")}
+                    onChange={(e) => set("disposalBy", e.target.value)}
+                    placeholder="Name of person handling disposal"
+                  />
+                </Field>
+                <Field label="Reason">
+                  <SearchableSelect
+                    value={form.disposalReason || ""}
+                    onChange={(v) => set("disposalReason", v)}
+                    options={DISPOSAL_REASON_OPTIONS.map((v) => ({ value: v, label: v }))}
+                    placeholder="Search or type a reason"
+                  />
+                </Field>
+                <Field label={`Date of ${form.status === "Retired" ? "Retirement" : "Disposal"}`}>
+                  <input
+                    type="date"
+                    value={form.disposalDate ?? todayISO()}
+                    onChange={(e) => set("disposalDate", e.target.value)}
+                  />
+                </Field>
+              </div>
             </div>
           )}
 
@@ -2816,6 +2982,17 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, mai
                   {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })})
                 </div>
               ))}
+            </div>
+          )}
+
+          {asset.disposalInfo && (
+            <div className="detail-group">
+              <div className="detail-group-label"><Archive size={12} /> Disposal Information</div>
+              <div className="detail-grid">
+                {row(`${asset.status === "Retired" ? "Retired" : "Disposed"} By`, asset.disposalInfo.by)}
+                {row("Reason", asset.disposalInfo.reason)}
+                {row(`Date of ${asset.status === "Retired" ? "Retirement" : "Disposal"}`, asset.disposalInfo.date)}
+              </div>
             </div>
           )}
         </div>
@@ -3454,6 +3631,7 @@ function buildBackupWorkbook(data) {
     preRepairStatus: a.preRepairStatus || "", notes: a.notes,
     transferHistory: cellify(a.transferHistory || []),
     pendingDeletion: cellify(a.pendingDeletion || null),
+    disposalInfo: cellify(a.disposalInfo || null),
   })));
 
   addSheet("Maintenance", (data.maintenance || []).map((m) => ({
@@ -3497,6 +3675,7 @@ function parseBackupWorkbook(wb) {
     preRepairStatus: r.preRepairStatus || null, notes: r.notes,
     transferHistory: parseCell(r.transferHistory, []),
     pendingDeletion: parseCell(r.pendingDeletion, null),
+    disposalInfo: parseCell(r.disposalInfo, null),
   }));
 
   const maintenance = sheetRows(wb, "Maintenance").map((r) => ({
