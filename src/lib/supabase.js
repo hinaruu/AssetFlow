@@ -102,8 +102,8 @@ const TABLES = {
   },
   auditLog: {
     table: "audit_log",
-    toRow: (e) => ({ id: e.id, at: e.at, user_id: e.userId || null, user_name: e.userName || null, message: e.message || null }),
-    fromRow: (r) => ({ id: r.id, at: r.at, userId: r.user_id, userName: r.user_name, message: r.message }),
+    toRow: (e) => ({ id: e.id, at: e.at, user_id: e.userId || null, user_name: e.userName || null, message: e.message || null, location_id: e.locationId || null }),
+    fromRow: (r) => ({ id: r.id, at: r.at, userId: r.user_id, userName: r.user_name, message: r.message, locationId: r.location_id }),
   },
   comments: {
     table: "comments",

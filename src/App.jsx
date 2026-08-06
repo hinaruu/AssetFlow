@@ -1358,6 +1358,9 @@ function emptyAsset(defaultLocationId) {
 }
 
 function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly, scopedLocationId, showToast, currentUser, focusAssetId, onFocusHandled }) {
+  // Regional Staff can export their location's assets but never import —
+  // only Admin and Regional Admin are trusted to write bulk data in.
+  const canImport = isAdmin || isRegionalAdmin;
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -1447,6 +1450,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   const [transferReason, setTransferReason] = useState("");
   const [sort, setSort] = useState({ key: null, dir: "asc" });
   const fileInputRef = React.useRef(null);
+  const [pendingImport, setPendingImport] = useState(null); // staged parsed rows awaiting the replace-confirmation below
 
   // The base pool of assets this user can see at all — a Regional Staff
   // account only ever sees their own location's assets.
@@ -2017,6 +2021,14 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
 
   const triggerImport = () => fileInputRef.current?.click();
 
+  // Regional Staff never reach this — the Import button and file input are
+  // only rendered for canImport (Admin or Regional Admin) below. Regional
+  // Admin's imported rows are always forced into their own assigned
+  // location (see locationId below), regardless of what the sheet's
+  // "location" column says, so they can never write into another country's
+  // data. Parsing only stages the result — nothing is saved until the
+  // confirmation dialog (which spells out exactly what will be replaced)
+  // is accepted.
   const handleImportFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -2043,7 +2055,11 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
           serial: row.serial || "",
           status: STATUS_OPTIONS.includes(row.status) ? row.status : "In Stock",
           condition: CONDITION_OPTIONS.includes(row.condition) ? row.condition : "Good",
-          locationId: !isAdmin && scopedLocationId ? scopedLocationId : (loc?.id || scopedLocationId || data.locations[0]?.id || ""),
+          // Regional Admin (scoped) can only ever import into their own
+          // location — the sheet's location column is ignored for them.
+          // Admin (unscoped) keeps whatever location the sheet specifies,
+          // falling back to the first location if it doesn't match one.
+          locationId: !isAdmin && scopedLocationId ? scopedLocationId : (loc?.id || data.locations[0]?.id || ""),
           assignedTo: row.assignedTo || "",
           purchaseDate: row.purchaseDate || todayISO(),
           purchaseCost: Number(row.purchaseCost) || 0,
@@ -2056,11 +2072,40 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
           disposalInfo: null,
         };
       });
-      persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via Excel`, !isAdmin ? scopedLocationId : null));
-      showToast(`Imported ${newAssets.length} asset(s).`);
+      // Every location touched by this import will have its existing
+      // assets replaced by the new rows — locations the file doesn't
+      // mention are left completely untouched.
+      const affectedLocationIds = new Set(newAssets.map((a) => a.locationId).filter(Boolean));
+      const existingInScope = data.assets.filter((a) => affectedLocationIds.has(a.locationId));
+      const affectedLocationNames = data.locations
+        .filter((l) => affectedLocationIds.has(l.id))
+        .map((l) => l.name);
+      setPendingImport({
+        newAssets,
+        affectedLocationIds,
+        affectedLocationNames,
+        existingCount: existingInScope.length,
+      });
     } catch {
       showToast("Could not parse this Excel file.");
     }
+  };
+
+  const confirmImport = () => {
+    if (!pendingImport) return;
+    const { newAssets, affectedLocationIds, affectedLocationNames } = pendingImport;
+    const removedAssetIds = new Set(data.assets.filter((a) => affectedLocationIds.has(a.locationId)).map((a) => a.id));
+    const keptAssets = data.assets.filter((a) => !affectedLocationIds.has(a.locationId));
+    const keptMaintenance = data.maintenance.filter((m) => !removedAssetIds.has(m.assetId));
+    const scopeLabel = affectedLocationNames.length ? affectedLocationNames.join(", ") : "the selected location(s)";
+    persist(withLog(
+      { ...data, assets: [...newAssets, ...keptAssets], maintenance: keptMaintenance },
+      currentUser,
+      `Imported ${newAssets.length} asset(s) via Excel, replacing existing asset data for ${scopeLabel}`,
+      !isAdmin ? scopedLocationId : null
+    ));
+    showToast(`Imported ${newAssets.length} asset(s).`);
+    setPendingImport(null);
   };
 
   return (
@@ -2107,8 +2152,12 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
               <Trash2 size={14} /> Delete ({selected.length})
             </button>
           )}
-          <input ref={fileInputRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleImportFile} />
-          <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import Excel</button>
+          {canImport && (
+            <>
+              <input ref={fileInputRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleImportFile} />
+              <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import Excel</button>
+            </>
+          )}
           <button className="btn ghost" onClick={exportExcel}><Download size={14} /> Export Excel</button>
           <button className="btn primary new-asset-btn" onClick={() => setEditing(newAssetDraft())}>
             <Plus size={14} /> New Asset
@@ -2346,6 +2395,17 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
           onChange={setBulkDeleteText}
           onCancel={() => { setBulkDeleteConfirmOpen(false); setBulkDeleteText(""); }}
           onConfirm={performBulkDelete}
+        />
+      )}
+      {pendingImport && (
+        <ConfirmDialog
+          message={`This will replace the existing asset data for ${
+            pendingImport.affectedLocationNames.length ? pendingImport.affectedLocationNames.join(", ") : "the imported location(s)"
+          }: ${pendingImport.existingCount} existing asset(s) there will be removed and replaced with the ${pendingImport.newAssets.length} row(s) from this file. Assets in other locations are not affected. This cannot be undone. Continue?`}
+          confirmLabel="Replace & Import"
+          onCancel={() => setPendingImport(null)}
+          onConfirm={confirmImport}
+          maxWidth={480}
         />
       )}
       {requestDeleteTarget && (

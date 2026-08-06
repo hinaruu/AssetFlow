@@ -73,7 +73,9 @@ create table if not exists audit_log (
   at timestamptz not null default now(),
   user_id text,
   user_name text,
-  message text
+  message text,
+  location_id text                -- which country/location this entry belongs to; null for
+                                   -- global admin-only actions (categories/locations/users/backup)
 );
 
 -- Helpful indexes for the filters/lookups the app does constantly
@@ -82,6 +84,7 @@ create index if not exists idx_assets_category on assets(category_id);
 create index if not exists idx_maintenance_asset on maintenance(asset_id);
 create index if not exists idx_users_location on users(location_id);
 create index if not exists idx_audit_log_at on audit_log(at desc);
+create index if not exists idx_audit_log_location on audit_log(location_id);
 
 -- ---------- 2. Row Level Security ----------
 -- Same "open" model as before (the app's own login screen — not the DB —
@@ -190,12 +193,12 @@ on conflict (id) do update set
   asset_id = excluded.asset_id, description = excluded.description,
   cost = excluded.cost, date = excluded.date, status = excluded.status;
 
-insert into audit_log (id, at, user_id, user_name, message)
-select e->>'id', (e->>'at')::timestamptz, e->>'userId', e->>'userName', e->>'message'
+insert into audit_log (id, at, user_id, user_name, message, location_id)
+select e->>'id', (e->>'at')::timestamptz, e->>'userId', e->>'userName', e->>'message', e->>'locationId'
 from app_data, jsonb_array_elements(payload->'auditLog') as e
 where id = 1
 on conflict (id) do update set
-  at = excluded.at, user_id = excluded.user_id, user_name = excluded.user_name, message = excluded.message;
+  at = excluded.at, user_id = excluded.user_id, user_name = excluded.user_name, message = excluded.message, location_id = excluded.location_id;
 
 -- ---------- 5. Sanity check — run this and compare counts to your old data ----------
 select
