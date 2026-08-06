@@ -72,19 +72,31 @@ function markUnderRepair(assets, assetId) {
 
 // Certain status changes imply the asset is no longer with anyone, so we
 // clear the fields that only make sense for something actively assigned —
-// Retired/Disposed also drop condition to Poor since it's no longer in
-// service at all, while In Stock just means it's back on the shelf.
+// Disposed also drops condition to Poor since it's no longer in service at
+// all, while In Stock just means it's back on the shelf.
 function applyStatusSideEffects(asset) {
-  if (asset.status === "Retired" || asset.status === "Disposed") {
+  if (asset.status === "Disposed") {
     return { ...asset, assignedTo: "", condition: "Poor", department: "" };
   }
   // Any other status means the asset is back in active service — clear
-  // disposal details left over from a previous Retired/Disposed period.
+  // disposal details left over from a previous Disposed period.
   const cleared = asset.disposalInfo ? { ...asset, disposalInfo: null } : asset;
   if (asset.status === "In Stock") {
     return { ...cleared, assignedTo: "", department: "" };
   }
   return cleared;
+}
+
+// One-time migration: Retired and Disposed used to be separate statuses;
+// they've since been merged into a single "Disposed" status. Any asset
+// still carrying the old "Retired" value (from before this change, or
+// pushed by a stale client) gets converted the moment it's loaded. Returns
+// the same object unchanged (changed: false) when there's nothing to do,
+// so callers can skip re-saving.
+function migrateRetiredToDisposed(orgData) {
+  if (!orgData?.assets?.some((a) => a.status === "Retired")) return { data: orgData, changed: false };
+  const assets = orgData.assets.map((a) => (a.status === "Retired" ? { ...a, status: "Disposed" } : a));
+  return { data: { ...orgData, assets }, changed: true };
 }
 
 // After a maintenance entry is closed/removed, checks whether the asset
@@ -103,7 +115,7 @@ function maybeRestoreStatus(assets, maintenance, assetId) {
 // within the next 30 days or already overdue.
 function computeAlerts(assets, scopedLocationId) {
   let list = scopedLocationId ? assets.filter((a) => a.locationId === scopedLocationId) : assets;
-  list = list.filter((a) => a.status !== "Retired" && a.status !== "Disposed");
+  list = list.filter((a) => a.status !== "Disposed");
   const now = new Date();
   const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
   const alerts = [];
@@ -197,7 +209,6 @@ const STATUS_COLORS = {
   "In Stock": "#3B82F6",
   "In Use": "#10B981",
   "Under Repair": "#F59E0B",
-  "Retired": "#9CA3AF",
   "Disposed": "#EF4444",
 };
 const STATUS_OPTIONS = Object.keys(STATUS_COLORS);
@@ -564,9 +575,11 @@ export default function App() {
     (async () => {
       try {
         const orgData = await loadFromCloud({ seedIfEmpty: true });
-        setData(orgData);
+        const { data: migrated, changed } = migrateRetiredToDisposed(orgData);
+        setData(migrated);
         setConnectionError(null);
         setLastSynced(new Date());
+        if (changed) saveOrgData(migrated, orgData).catch(() => {});
       } catch (err) {
         setConnectionError(err?.message || "Could not connect to the database.");
       } finally {
@@ -580,8 +593,10 @@ export default function App() {
   // fallback (e.g. right after reconnecting).
   useEffect(() => {
     const unsubscribe = subscribeToOrgData((next) => {
-      setData(next);
+      const { data: migrated, changed } = migrateRetiredToDisposed(next);
+      setData(migrated);
       setLastSynced(new Date());
+      if (changed) saveOrgData(migrated, next).catch(() => {});
     });
     return unsubscribe;
   }, []);
@@ -638,7 +653,7 @@ export default function App() {
             </p>
             <button
               className="btn primary full"
-              onClick={() => { setLoaded(false); setConnectionError(null); loadFromCloud({ seedIfEmpty: true }).then((d) => { setData(d); setLastSynced(new Date()); }).catch((e) => setConnectionError(e?.message || "Could not connect.")).finally(() => setLoaded(true)); }}
+              onClick={() => { setLoaded(false); setConnectionError(null); loadFromCloud({ seedIfEmpty: true }).then((d) => { const { data: migrated, changed } = migrateRetiredToDisposed(d); setData(migrated); setLastSynced(new Date()); if (changed) saveOrgData(migrated, d).catch(() => {}); }).catch((e) => setConnectionError(e?.message || "Could not connect.")).finally(() => setLoaded(true)); }}
             >
               Retry
             </button>
@@ -971,12 +986,12 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
 --------------------------------------------------------- */
 function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   const isAdmin = currentUser?.role === "Admin";
-  // Retired/Disposed assets are excluded from every dashboard figure below —
+  // Disposed assets are excluded from every dashboard figure below —
   // they're historical records, not part of the active fleet being measured.
   const assets = (scopedLocationId
     ? data.assets.filter((a) => a.locationId === scopedLocationId)
     : data.assets
-  ).filter((a) => a.status !== "Retired" && a.status !== "Disposed");
+  ).filter((a) => a.status !== "Disposed");
 
   const statusData = useMemo(() => {
     const counts = {};
@@ -1000,7 +1015,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   const locationData = useMemo(() => {
     if (!isAdmin) return [];
     const counts = {};
-    data.assets.filter((a) => a.status !== "Retired" && a.status !== "Disposed").forEach((a) => {
+    data.assets.filter((a) => a.status !== "Disposed").forEach((a) => {
       const loc = data.locations.find((l) => l.id === a.locationId);
       const name = loc ? loc.name : "Unassigned";
       counts[name] = (counts[name] || 0) + 1;
@@ -1437,8 +1452,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   const [inUseDepartment, setInUseDepartment] = useState("");
   const [inUseAssignedTo, setInUseAssignedTo] = useState("");
   const [inUseLocationId, setInUseLocationId] = useState("");
-  const [disposePromptAsset, setDisposePromptAsset] = useState(null); // asset awaiting disposal details before going Retired/Disposed
-  const [disposeTargetStatus, setDisposeTargetStatus] = useState("Disposed"); // "Retired" or "Disposed"
+  const [disposePromptAsset, setDisposePromptAsset] = useState(null); // asset awaiting disposal details before going Disposed
   const [disposedBy, setDisposedBy] = useState("");
   const [disposeReason, setDisposeReason] = useState("");
   const [disposeDate, setDisposeDate] = useState("");
@@ -1498,15 +1512,15 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     }
   }, [categoryOptions, categoryFilter]);
 
-  // Retired/Disposed assets are kept for records but shouldn't clutter the
-  // everyday working view — "All assets" (and every other preset except the
+  // Disposed assets are kept for records but shouldn't clutter the everyday
+  // working view — "All assets" (and every other preset except the
   // dedicated one below) only ever looks at assets still in active use.
   const activeAssetsBase = useMemo(
-    () => scopedAssetsBase.filter((a) => a.status !== "Retired" && a.status !== "Disposed"),
+    () => scopedAssetsBase.filter((a) => a.status !== "Disposed"),
     [scopedAssetsBase]
   );
   const disposedAssetsBase = useMemo(
-    () => scopedAssetsBase.filter((a) => a.status === "Retired" || a.status === "Disposed"),
+    () => scopedAssetsBase.filter((a) => a.status === "Disposed"),
     [scopedAssetsBase]
   );
 
@@ -1519,7 +1533,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     const underRepairCount = activeAssetsBase.filter((a) => a.status === "Under Repair").length;
     const needsAttentionCount = activeAssetsBase.filter((a) => assetAlertMap.has(a.id)).length;
     const pendingApprovalCount = activeAssetsBase.filter((a) => !!a.pendingDeletion).length;
-    const retiredDisposedCount = disposedAssetsBase.length;
+    const disposedCount = disposedAssetsBase.length;
     return [
       { id: "all", label: "All assets", color: null },
       { id: "inStock", label: "In Stock", count: inStockCount, color: STATUS_COLORS["In Stock"] },
@@ -1527,7 +1541,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       { id: "underRepair", label: "Under repair", count: underRepairCount, color: STATUS_COLORS["Under Repair"] },
       { id: "needsAttention", label: "Needs attention", count: needsAttentionCount, color: "#EF4444" },
       ...(isAdmin || isRegionalAdmin ? [{ id: "pendingApproval", label: "Pending approval", count: pendingApprovalCount, color: "#8B5CF6" }] : []),
-      { id: "retiredDisposed", label: "Retired / Disposed", count: retiredDisposedCount, color: STATUS_COLORS["Disposed"] },
+      { id: "disposed", label: "Disposed", count: disposedCount, color: STATUS_COLORS["Disposed"] },
     ].filter((p) => p.id === "all" || p.count > 0 || presetFilter === p.id);
   }, [activeAssetsBase, disposedAssetsBase, assetAlertMap, isAdmin, isRegionalAdmin, presetFilter]);
 
@@ -1541,7 +1555,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   }, [presetOptions, presetFilter]);
 
   const visibleAssets = useMemo(() => {
-    let list = presetFilter === "retiredDisposed" ? disposedAssetsBase : activeAssetsBase;
+    let list = presetFilter === "disposed" ? disposedAssetsBase : activeAssetsBase;
     if (presetFilter === "inStock") list = list.filter((a) => a.status === "In Stock");
     else if (presetFilter === "inUse") list = list.filter((a) => a.status === "In Use");
     else if (presetFilter === "underRepair") list = list.filter((a) => a.status === "Under Repair");
@@ -1614,7 +1628,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     let autoMaint = null;
     if (assetFields.id) {
       const prev = data.assets.find((a) => a.id === assetFields.id);
-      const prevWasDisposed = prev?.status === "Retired" || prev?.status === "Disposed";
+      const prevWasDisposed = prev?.status === "Disposed";
       let finalAsset = assetFields;
       if (assetFields.status === "Under Repair" && prev?.status !== "Under Repair") {
         finalAsset = { ...assetFields, preRepairStatus: prev?.status || "In Use" };
@@ -1622,7 +1636,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       } else if (assetFields.status !== "Under Repair" && prev?.status === "Under Repair") {
         finalAsset = { ...assetFields, preRepairStatus: null };
       }
-      if ((assetFields.status === "Retired" || assetFields.status === "Disposed") && !prevWasDisposed) {
+      if ((assetFields.status === "Disposed") && !prevWasDisposed) {
         finalAsset = { ...finalAsset, disposalInfo: buildDisposalInfo() };
       }
       finalAsset = applyStatusSideEffects(finalAsset);
@@ -1642,7 +1656,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       if (newAsset.status === "Under Repair") {
         autoMaint = { id: uid("maint"), assetId: newAsset.id, description: (repairReason || "").trim() || "Marked Under Repair from Assets", status: "Not Started", date: todayISO(), cost: "" };
       }
-      if (newAsset.status === "Retired" || newAsset.status === "Disposed") {
+      if (newAsset.status === "Disposed") {
         newAsset = { ...newAsset, disposalInfo: buildDisposalInfo() };
       }
       newAsset = applyStatusSideEffects(newAsset);
@@ -1665,12 +1679,12 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   // In Use is also a special case — it pops up a small form to capture
   // who it's now with, since that's normally the whole point of marking
   // something In Use; the status only actually changes once that's saved
-  // (see submitInUseAssignment below). Retired/Disposed is the same idea —
+  // (see submitInUseAssignment below). Disposed is the same idea —
   // it pops up a form for the disposal details; the status only actually
   // changes once that form is saved (see submitDisposal below).
   const quickStatusChange = async (asset, newStatus) => {
     if (newStatus === asset.status) return;
-    const wasDisposedAsset = asset.status === "Retired" || asset.status === "Disposed";
+    const wasDisposedAsset = asset.status === "Disposed";
     if (wasDisposedAsset) {
       const ok = window.confirm(
         `This asset is currently marked "${asset.status}". Changing its status to "${newStatus}" will restore it to active use and clear its disposal record. Continue?`
@@ -1684,12 +1698,14 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     if (newStatus === "In Use") {
       setInUseDepartment(asset.department || "");
       setInUseAssignedTo(asset.assignedTo || "");
-      setInUseLocationId(asset.locationId || "");
+      // Regional Admin/Staff can only ever act on their own location, so
+      // default (and later lock) it to that — only the Overall Admin picks
+      // freely, defaulting to wherever the asset currently sits.
+      setInUseLocationId(scopedLocationId || asset.locationId || "");
       setInUsePromptAsset(asset);
       return;
     }
-    if (newStatus === "Retired" || newStatus === "Disposed") {
-      setDisposeTargetStatus(newStatus);
+    if (newStatus === "Disposed") {
       setDisposedBy(currentUser.name || "");
       setDisposeReason("");
       setDisposeDate(todayISO());
@@ -1725,16 +1741,16 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     showToast("Status updated.");
   };
 
-  // Saves the disposal details collected from the Retired/Disposed popup,
-  // and only now actually flips the asset's status — cancelling that popup
-  // leaves the asset untouched.
+  // Saves the disposal details collected from the Disposed popup, and only
+  // now actually flips the asset's status — cancelling that popup leaves
+  // the asset untouched.
   const submitDisposal = () => {
     const asset = disposePromptAsset;
     if (!asset) return;
     if (!disposeReason.trim()) { alert("Please select or enter a reason."); return; }
     let finalAsset = {
       ...asset,
-      status: disposeTargetStatus,
+      status: "Disposed",
       disposalInfo: {
         by: disposedBy.trim() || currentUser.name,
         reason: disposeReason.trim(),
@@ -1747,7 +1763,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
-    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${disposeTargetStatus}" — reason: ${disposeReason.trim()}`, finalAsset.locationId);
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "Disposed" — reason: ${disposeReason.trim()}`, finalAsset.locationId);
     persist(next);
     setDisposePromptAsset(null);
     showToast("Status updated.");
@@ -2183,6 +2199,24 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
         </div>
       )}
 
+      {/* Built straight off STATUS_COLORS/CONDITION_COLORS, so adding a new
+          status or condition anywhere in the app automatically shows up
+          here too — nothing to remember to update by hand. */}
+      <div className="table-legend status-legend">
+        <span className="table-legend-label">Status:</span>
+        {STATUS_OPTIONS.map((s) => (
+          <span key={s} className="table-legend-item">
+            <span className="legend-dot" style={{ background: STATUS_COLORS[s] }} /> {s}
+          </span>
+        ))}
+        <span className="table-legend-label">Condition:</span>
+        {CONDITION_OPTIONS.map((c) => (
+          <span key={c} className="table-legend-item">
+            <span className="legend-dot" style={{ background: CONDITION_COLORS[c] }} /> {c}
+          </span>
+        ))}
+      </div>
+
       <div className="panel">
         <div className="table-wrap">
           <table>
@@ -2267,7 +2301,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
                         </div>
                       )}
                     </td>
-                    <td data-label="Condition">{a.condition}</td>
+                    <td data-label="Condition"><Badge color={CONDITION_COLORS[a.condition] || "#6B7280"}>{a.condition}</Badge></td>
                     <td className="actions-cell" onClick={(e) => e.stopPropagation()}>
                       <div className="row-actions">
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing(a)} />
@@ -2346,7 +2380,11 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
                 options={data.locations.map((l) => ({ value: l.id, label: l.name }))}
                 placeholder="Search locations"
                 allowCustom={false}
+                disabled={!isAdmin}
               />
+              {!isAdmin && (
+                <span className="field-hint">Locked to your assigned location — only the Overall Admin can change this.</span>
+              )}
             </Field>
           </div>
           <div className="form-full modal-actions">
@@ -2356,9 +2394,9 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
         </Modal>
       )}
       {disposePromptAsset && (
-        <Modal title={`Mark ${disposeTargetStatus} — ${disposePromptAsset.tag}`} onClose={() => setDisposePromptAsset(null)} width={480}>
+        <Modal title={`Mark Disposed — ${disposePromptAsset.tag}`} onClose={() => setDisposePromptAsset(null)} width={480}>
           <div className="form-full hint-box" style={{ marginBottom: 14 }}>
-            This asset will be marked {disposeTargetStatus} once you save these details.
+            This asset will be marked Disposed once you save these details.
           </div>
           <div className="form-grid">
             <Field label="Disposed By" required>
@@ -2372,7 +2410,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
                 placeholder="Search or type a reason"
               />
             </Field>
-            <Field label={`Date of ${disposeTargetStatus === "Retired" ? "Retirement" : "Disposal"}`} required>
+            <Field label="Date of Disposal" required>
               <input type="date" value={disposeDate} onChange={(e) => setDisposeDate(e.target.value)} />
             </Field>
           </div>
@@ -2671,8 +2709,8 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
   const wasUnderRepair = asset.status === "Under Repair";
   const needsReason = form.status === "Under Repair" && !wasUnderRepair;
 
-  const wasDisposed = asset.status === "Retired" || asset.status === "Disposed";
-  const needsDisposalReason = (form.status === "Retired" || form.status === "Disposed") && !wasDisposed;
+  const wasDisposed = asset.status === "Disposed";
+  const needsDisposalReason = (form.status === "Disposed") && !wasDisposed;
 
   const brandOptions = useMemo(() => {
     const brandSet = new Set((existingAssets || []).map((a) => a.brand).filter(Boolean));
@@ -2761,7 +2799,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
       alert(`Please select or enter a reason for marking this asset "${form.status}".`);
       return;
     }
-    if (wasDisposed && form.status !== "Retired" && form.status !== "Disposed") {
+    if (wasDisposed && form.status !== "Disposed") {
       const ok = window.confirm(
         `This asset is currently marked "${asset.status}". Changing its status to "${form.status}" will restore it to active use and clear its disposal record. Continue?`
       );
@@ -2888,7 +2926,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
                     placeholder="Search or type a reason"
                   />
                 </Field>
-                <Field label={`Date of ${form.status === "Retired" ? "Retirement" : "Disposal"}`}>
+                <Field label="Date of Disposal">
                   <input
                     type="date"
                     value={form.disposalDate ?? todayISO()}
@@ -3103,9 +3141,9 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
             <div className="detail-group">
               <div className="detail-group-label"><Archive size={12} /> Disposal Information</div>
               <div className="detail-grid">
-                {row(`${asset.status === "Retired" ? "Retired" : "Disposed"} By`, asset.disposalInfo.by)}
+                {row("Disposed By", asset.disposalInfo.by)}
                 {row("Reason", asset.disposalInfo.reason)}
-                {row(`Date of ${asset.status === "Retired" ? "Retirement" : "Disposal"}`, asset.disposalInfo.date)}
+                {row("Date of Disposal", asset.disposalInfo.date)}
               </div>
             </div>
           )}
@@ -4239,6 +4277,8 @@ function GlobalStyles() {
       .table-legend { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; font-size: 12px; color: var(--text-soft); margin: 0 0 10px 2px; }
       .table-legend-item { display: inline-flex; align-items: center; gap: 5px; }
       .table-legend-item svg { margin-left: 0 !important; }
+      .table-legend-label { font-weight: 700; color: var(--text); margin-right: -8px; }
+      .status-legend { row-gap: 8px; margin-bottom: 12px; }
 
       .notif-wrap { position: relative; }
       .notif-dot { position: absolute; top: -3px; right: -3px; background: var(--danger); color: white; font-size: 9.5px; font-weight: 700; border-radius: 999px; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
