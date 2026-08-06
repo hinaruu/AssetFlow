@@ -4,7 +4,7 @@ import {
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
   KeyRound, ShieldCheck, AlertTriangle, Info, Clock,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
-  ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle,
+  ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle, Check,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import * as XLSX from "xlsx";
@@ -2698,13 +2698,22 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
   // assigns the next ASTUTE### on save). Editing an asset always shows its
   // real tag — auto-generate only applies at creation time.
   const [autoTag, setAutoTag] = useState(!asset.id && !asset.tag);
-  // Optional Information starts open if there's already something in it
-  // (editing an asset that has purchase/warranty/notes data), otherwise
-  // collapsed so the main form stays short.
-  const [optionalOpen, setOptionalOpen] = useState(
-    !!(asset.purchaseDate || asset.purchaseCost || (asset.warrantyExpiry && asset.warrantyExpiry !== "N/A") || asset.notes)
-  );
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // A brand-new asset walks through the steps one at a time — that's the
+  // whole point of the wizard, so someone isn't handed all four sections'
+  // worth of fields at once. Editing an existing asset already has every
+  // field filled in, so there's nothing to "walk through" — every step tab
+  // is unlocked immediately for quick jumping around.
+  const isNew = !asset.id;
+  const WIZARD_STEPS = [
+    { key: "info", label: "Asset Information", icon: Package },
+    { key: "device", label: "Device Details", icon: Tags },
+    { key: "assignment", label: "Assignment", icon: User },
+    { key: "optional", label: "Optional Information", icon: Info },
+  ];
+  const [step, setStep] = useState(0);
+  const [maxStepReached, setMaxStepReached] = useState(isNew ? 0 : WIZARD_STEPS.length - 1);
 
   const wasUnderRepair = asset.status === "Under Repair";
   const needsReason = form.status === "Under Repair" && !wasUnderRepair;
@@ -2767,19 +2776,52 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
     if (checked) set("tag", "");
   };
 
+  // Checks only the fields that belong to a given step — this is what lets
+  // "Next" catch a missing asset name before letting someone wander off to
+  // Device Details, without also demanding they've filled in Assignment.
+  const stepError = (i) => {
+    if (i === 0) {
+      if (!form.name.trim()) return "Please enter an asset name.";
+      if (!form.categoryId) return "Please select a category.";
+    }
+    if (i === 1) {
+      if (!form.status) return "Please select a status.";
+      if (needsReason && !(form.repairReason || "").trim()) return "Please enter a reason — this creates the matching Maintenance entry.";
+      if (needsDisposalReason && !(form.disposalReason || "").trim()) return `Please select or enter a reason for marking this asset "${form.status}".`;
+    }
+    return null;
+  };
+
+  const goToStep = (i) => {
+    // New assets can only jump to a step they've already reached via Next —
+    // no skipping ahead to Assignment with a blank name. Editing an
+    // existing asset has no such restriction (maxStepReached starts maxed).
+    if (i > maxStepReached) return;
+    setStep(i);
+  };
+
+  const goNext = () => {
+    const err = stepError(step);
+    if (err) { alert(err); return; }
+    const next = Math.min(step + 1, WIZARD_STEPS.length - 1);
+    setStep(next);
+    setMaxStepReached((m) => Math.max(m, next));
+  };
+
+  const goBack = () => setStep((s) => Math.max(s - 1, 0));
+
   const submit = (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!form.name.trim()) {
-      alert("Please enter an asset name.");
+    // Enter-key inside any step's inputs fires the form's onSubmit — on any
+    // step but the last, that should just behave like clicking "Next"
+    // rather than trying to save early.
+    if (step !== WIZARD_STEPS.length - 1) {
+      goNext();
       return;
     }
-    if (!form.categoryId) {
-      alert("Please select a category.");
-      return;
-    }
-    if (!form.status) {
-      alert("Please select a status.");
-      return;
+    for (let i = 0; i < WIZARD_STEPS.length - 1; i++) {
+      const err = stepError(i);
+      if (err) { alert(err); setStep(i); setMaxStepReached((m) => Math.max(m, i)); return; }
     }
     const tag = String(form.tag || "").trim();
     if (tag) {
@@ -2788,16 +2830,9 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
       );
       if (dup) {
         alert(`Asset Tag "${tag}" is already used by "${dup.name || "another asset"}". Please use a unique tag.`);
+        setStep(0);
         return;
       }
-    }
-    if (needsReason && !(form.repairReason || "").trim()) {
-      alert("Please enter a reason — this creates the matching Maintenance entry.");
-      return;
-    }
-    if (needsDisposalReason && !(form.disposalReason || "").trim()) {
-      alert(`Please select or enter a reason for marking this asset "${form.status}".`);
-      return;
     }
     if (wasDisposed && form.status !== "Disposed") {
       const ok = window.confirm(
@@ -2816,6 +2851,29 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
   return (
     <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={820}>
       <form onSubmit={submit}>
+        <div className="wizard-steps">
+          {WIZARD_STEPS.map((s, i) => {
+            const Icon = s.icon;
+            const locked = i > maxStepReached;
+            return (
+              <React.Fragment key={s.key}>
+                {i > 0 && <span className={`wizard-step-connector ${i <= maxStepReached ? "done" : ""}`} />}
+                <button
+                  type="button"
+                  className={`wizard-step ${step === i ? "active" : ""} ${i < maxStepReached ? "done" : ""} ${locked ? "locked" : ""}`}
+                  onClick={() => goToStep(i)}
+                  disabled={locked}
+                  title={locked ? "Complete the earlier steps first" : s.label}
+                >
+                  <span className="wizard-step-icon">{i < maxStepReached ? <Check size={13} /> : <Icon size={13} />}</span>
+                  <span className="wizard-step-label">{s.label}</span>
+                </button>
+              </React.Fragment>
+            );
+          })}
+        </div>
+
+        {step === 0 && (
         <FormSection icon={Package} title="Asset Information">
           <Field label="Asset Name" required>
             <input value={form.name} onChange={(e) => set("name", e.target.value)} autoFocus required />
@@ -2847,7 +2905,9 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
             </select>
           </Field>
         </FormSection>
+        )}
 
+        {step === 1 && (
         <FormSection icon={Tags} title="Device Details">
           <Field label="Brand">
             <SearchableSelect value={form.brand} onChange={(v) => set("brand", v)} options={brandOptions} placeholder="Search or type a brand" />
@@ -2957,7 +3017,9 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
             </>
           )}
         </FormSection>
+        )}
 
+        {step === 2 && (
         <FormSection icon={User} title="Assignment">
           <Field label="Department">
             <SearchableSelect value={form.department || ""} onChange={(v) => set("department", v)} options={departmentSelectOptions} placeholder="Search or type a department" />
@@ -2981,53 +3043,50 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
             </Field>
           </div>
         </FormSection>
+        )}
 
-        <div className="form-section optional-section">
-          <button type="button" className="optional-section-toggle" onClick={() => setOptionalOpen((o) => !o)}>
-            <span className="form-section-head" style={{ marginBottom: 0 }}>
-              <span className="form-section-head-icon"><Info size={14} /></span>
-              <h4>Optional Information</h4>
-            </span>
-            {optionalOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-          </button>
-          {optionalOpen && (
-            <div className="section-grid optional-section-body">
-              <div className="form-full">
-                <ToggleSwitch checked={hasPurchaseInfo} onChange={(yes) => {
-                  setHasPurchaseInfo(yes);
-                  if (yes && !form.purchaseDate) set("purchaseDate", todayISO());
-                }} label="Add purchase info" />
-              </div>
-              {hasPurchaseInfo && (
-                <>
-                  <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
-                  <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
-                </>
-              )}
-              {form.assetType === "IT" && (
-                <div className="form-full">
-                  <ToggleSwitch checked={hasWarrantyExpiry} onChange={(yes) => {
-                    setHasWarrantyExpiry(yes);
-                    if (yes && (!form.warrantyExpiry || form.warrantyExpiry === "N/A")) set("warrantyExpiry", todayISO());
-                    if (!yes) set("warrantyExpiry", "");
-                  }} label="Add warranty expiry" />
-                </div>
-              )}
-              {form.assetType === "IT" && hasWarrantyExpiry && (
-                <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
-              )}
-              <div className="form-full">
-                <Field label="Notes">
-                  <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} />
-                </Field>
-              </div>
+        {step === 3 && (
+        <FormSection icon={Info} title="Optional Information">
+          <div className="form-full">
+            <ToggleSwitch checked={hasPurchaseInfo} onChange={(yes) => {
+              setHasPurchaseInfo(yes);
+              if (yes && !form.purchaseDate) set("purchaseDate", todayISO());
+            }} label="Add purchase info" />
+          </div>
+          {hasPurchaseInfo && (
+            <>
+              <Field label="Purchase Date"><input type="date" value={form.purchaseDate} onChange={(e) => set("purchaseDate", e.target.value)} /></Field>
+              <Field label="Purchase Cost"><input type="number" value={form.purchaseCost} onChange={(e) => set("purchaseCost", e.target.value)} /></Field>
+            </>
+          )}
+          {form.assetType === "IT" && (
+            <div className="form-full">
+              <ToggleSwitch checked={hasWarrantyExpiry} onChange={(yes) => {
+                setHasWarrantyExpiry(yes);
+                if (yes && (!form.warrantyExpiry || form.warrantyExpiry === "N/A")) set("warrantyExpiry", todayISO());
+                if (!yes) set("warrantyExpiry", "");
+              }} label="Add warranty expiry" />
             </div>
           )}
-        </div>
+          {form.assetType === "IT" && hasWarrantyExpiry && (
+            <Field label="Warranty Expiry"><input type="date" value={form.warrantyExpiry} onChange={(e) => set("warrantyExpiry", e.target.value)} /></Field>
+          )}
+          <div className="form-full">
+            <Field label="Notes">
+              <textarea value={form.notes} onChange={(e) => set("notes", e.target.value)} rows={2} />
+            </Field>
+          </div>
+        </FormSection>
+        )}
 
         <div className="modal-footer-sticky">
+          <span className="wizard-step-count">Step {step + 1} of {WIZARD_STEPS.length}</span>
+          <div style={{ flex: 1 }} />
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary">{asset.id ? "Save Changes" : "Create Asset"}</button>
+          {step > 0 && <button type="button" className="btn ghost" onClick={goBack}>Back</button>}
+          {step < WIZARD_STEPS.length - 1
+            ? <button type="button" className="btn primary" onClick={goNext}>Next</button>
+            : <button type="submit" className="btn primary">{asset.id ? "Save Changes" : "Create Asset"}</button>}
         </div>
       </form>
     </Modal>
@@ -4564,14 +4623,24 @@ function GlobalStyles() {
       .searchable-select-option:hover { background: var(--accent-soft); color: var(--accent); }
       .searchable-select-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-soft); cursor: pointer; padding: 2px; display: flex; }
 
-      /* Repair-reason callout + optional collapsible section */
+      /* Repair-reason callout */
       .repair-reason-box { background: color-mix(in srgb, var(--danger) 6%, var(--bg)); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border)); border-radius: 9px; padding: 10px 12px; }
-      .optional-section-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; background: none; border: none; cursor: pointer; padding: 0; color: var(--text-soft); font-family: inherit; }
-      .optional-section-toggle:hover .form-section-head h4 { color: var(--accent); }
-      .optional-section-body { margin-top: 10px; }
+
+      /* New/Edit Asset wizard stepper */
+      .wizard-steps { display: flex; align-items: center; margin-bottom: 16px; }
+      .wizard-step { display: flex; align-items: center; gap: 6px; background: none; border: none; padding: 6px 4px; cursor: pointer; color: var(--text-soft); font-family: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      .wizard-step:disabled { cursor: not-allowed; opacity: 0.45; }
+      .wizard-step-icon { width: 20px; height: 20px; border-radius: 999px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: var(--bg); border: 1px solid var(--border); color: var(--text-soft); }
+      .wizard-step.active { color: var(--text); }
+      .wizard-step.active .wizard-step-icon { background: var(--accent); border-color: var(--accent); color: white; }
+      .wizard-step.done .wizard-step-icon { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+      .wizard-step-connector { flex: 1 1 16px; height: 1px; background: var(--border); min-width: 10px; }
+      .wizard-step-connector.done { background: var(--accent); }
+      .wizard-step-count { font-size: 11.5px; color: var(--text-soft); }
+      @media (max-width: 640px) { .wizard-step-label { display: none; } }
 
       /* Sticky footer for the New/Edit Asset form */
-      .modal-footer-sticky { position: sticky; bottom: 0; margin: 14px -18px -18px; padding: 12px 18px; background: var(--surface); border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; border-radius: 0 0 14px 14px; }
+      .modal-footer-sticky { position: sticky; bottom: 0; margin: 14px -18px -18px; padding: 12px 18px; background: var(--surface); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-radius: 0 0 14px 14px; }
       .sort-th-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; padding: 0; font: inherit; font-weight: inherit; color: inherit; cursor: pointer; }
       .sort-th-idle { opacity: 0.35; }
       .name-subtext { font-size: 11.5px; color: var(--text-soft); font-weight: 400; margin-top: 2px; }
