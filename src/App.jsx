@@ -717,7 +717,7 @@ export default function App() {
               <BackupView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "activity" && (
-              <ActivityLogView data={data} isAdmin={isAdmin} scopedLocationId={scopedLocationId} />
+              <ActivityLogView data={data} isAdmin={isAdmin} scopedLocationId={scopedLocationId} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "approvals" && isAdmin && (
               <ApprovalsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
@@ -1070,6 +1070,23 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
     return { thisMonth, next30, overdue };
   }, [assets]);
 
+  // Purchase / Asset Value: total recorded purchase cost, broken down by
+  // category. Assets with no purchase cost on file simply don't contribute
+  // — this is a "what we've recorded" figure, not an estimate.
+  const valueByCategory = useMemo(() => {
+    const totals = {};
+    assets.forEach((a) => {
+      const cost = Number(a.purchaseCost) || 0;
+      if (!cost) return;
+      const cat = data.categories.find((c) => c.id === a.categoryId);
+      const name = cat ? cat.name : "Uncategorized";
+      totals[name] = (totals[name] || 0) + cost;
+    });
+    return Object.entries(totals).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+  }, [assets, data.categories]);
+  const totalValue = valueByCategory.reduce((sum, c) => sum + c.value, 0);
+  const maxCatValue = valueByCategory.length ? valueByCategory[0].value : 0;
+
   // Regional Staff should only see activity for assets in their own
   // location/country — entries get tagged with a locationId when they're
   // logged (see withLog call sites); anything untagged (category/location/
@@ -1143,7 +1160,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
         )}
       </div>
 
-      <div className="bottom-row bottom-row-2">
+      <div className="bottom-row">
         <div className="panel">
           <div className="panel-head"><h3>Warranty Overview</h3></div>
           <div className="warranty-stats">
@@ -1181,6 +1198,29 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
               <div className="warranty-stat-label">Overdue<br />Assets</div>
             </div>
           </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head"><h3>Purchase / Asset Value</h3></div>
+          <div className="value-total">
+            <span className="value-total-amount">${totalValue.toLocaleString()}</span>
+            <span className="value-total-label">Total recorded value{isAdmin ? ", all locations" : ""}</span>
+          </div>
+          {valueByCategory.length === 0 ? (
+            <div className="empty-chart" style={{ padding: "0 18px 18px" }}>No purchase cost recorded yet.</div>
+          ) : (
+            <ul className="value-bar-list">
+              {valueByCategory.slice(0, 5).map((c, i) => (
+                <li key={c.name} className="value-bar-row">
+                  <span className="value-bar-label" title={c.name}>{c.name}</span>
+                  <div className="value-bar-track">
+                    <div className="value-bar-fill" style={{ width: `${maxCatValue ? (c.value / maxCatValue) * 100 : 0}%`, background: categoryPalette[c.name] || CAT_PALETTE[i % CAT_PALETTE.length] }} />
+                  </div>
+                  <span className="value-bar-amount">${c.value.toLocaleString()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         <div className="panel">
@@ -1941,7 +1981,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     }
   };
 
-  const EXPORT_COLS = ["tag", "name", "department", "assetType", "brand", "model", "yearModel", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate"];
+  const EXPORT_COLS = ["tag", "name", "department", "assetType", "brand", "model", "yearModel", "serial", "status", "condition", "location", "assignedTo", "purchaseDate", "purchaseCost", "warrantyExpiry", "requiresCalibration", "calibrationDate", "nextCalibrationDate", "notes"];
 
   const exportExcel = () => {
     const rows = visibleAssets.map((a) => {
@@ -1953,11 +1993,31 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         purchaseDate: a.purchaseDate || "", purchaseCost: a.purchaseCost || "", warrantyExpiry: a.warrantyExpiry || "",
         requiresCalibration: a.requiresCalibration ? "Yes" : "No",
         calibrationDate: a.calibrationDate || "", nextCalibrationDate: a.nextCalibrationDate || "",
+        notes: a.notes || "",
       };
     });
     const wb = XLSX.utils.book_new();
     const sheet = XLSX.utils.json_to_sheet(rows, { header: EXPORT_COLS });
     XLSX.utils.book_append_sheet(wb, sheet, "Assets");
+
+    // A second sheet with every comment on the exported assets, keyed by
+    // the human-readable Asset Tag rather than an internal id — this
+    // export is meant to be read directly, not restored from.
+    const exportedAssetIds = new Set(visibleAssets.map((a) => a.id));
+    const commentRows = (data.comments || [])
+      .filter((c) => exportedAssetIds.has(c.assetId))
+      .map((c) => {
+        const asset = visibleAssets.find((a) => a.id === c.assetId);
+        return {
+          assetTag: asset?.tag || "", assetName: asset?.name || "",
+          author: c.authorName || "", message: c.message || "",
+          at: c.at ? new Date(c.at).toLocaleString() : "",
+        };
+      })
+      .sort((a, b) => a.assetTag.localeCompare(b.assetTag) || new Date(a.at) - new Date(b.at));
+    const commentSheet = XLSX.utils.json_to_sheet(commentRows, { header: ["assetTag", "assetName", "author", "message", "at"] });
+    XLSX.utils.book_append_sheet(wb, commentSheet, "Comments");
+
     downloadWorkbook(wb, "assets-export.xlsx");
     showToast("Assets exported.");
   };
@@ -1990,7 +2050,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           serial: row.serial || "",
           status: STATUS_OPTIONS.includes(row.status) ? row.status : "In Stock",
           condition: CONDITION_OPTIONS.includes(row.condition) ? row.condition : "Good",
-          locationId: loc?.id || scopedLocationId || data.locations[0]?.id || "",
+          locationId: !isAdmin && scopedLocationId ? scopedLocationId : (loc?.id || scopedLocationId || data.locations[0]?.id || ""),
           assignedTo: row.assignedTo || "",
           purchaseDate: row.purchaseDate || todayISO(),
           purchaseCost: Number(row.purchaseCost) || 0,
@@ -1998,12 +2058,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           requiresCalibration: String(row.requiresCalibration || "").toLowerCase() === "yes",
           calibrationDate: row.calibrationDate || "",
           nextCalibrationDate: row.nextCalibrationDate || "",
-          notes: "",
+          notes: row.notes || "",
           transferHistory: [],
           disposalInfo: null,
         };
       });
-      persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via Excel`));
+      persist(withLog({ ...data, assets: [...newAssets, ...data.assets] }, currentUser, `Imported ${newAssets.length} asset(s) via Excel`, !isAdmin ? scopedLocationId : null));
       showToast(`Imported ${newAssets.length} asset(s).`);
     } catch {
       showToast("Could not parse this Excel file.");
@@ -2054,13 +2114,9 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
               <Trash2 size={14} /> Delete ({selected.length})
             </button>
           )}
-          {isAdmin && (
-            <>
-              <input ref={fileInputRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleImportFile} />
-              <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import Excel</button>
-              <button className="btn ghost" onClick={exportExcel}><Download size={14} /> Export Excel</button>
-            </>
-          )}
+          <input ref={fileInputRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleImportFile} />
+          <button className="btn ghost" onClick={triggerImport}><Upload size={14} /> Import Excel</button>
+          <button className="btn ghost" onClick={exportExcel}><Download size={14} /> Export Excel</button>
           <button className="btn primary new-asset-btn" onClick={() => setEditing(newAssetDraft())}>
             <Plus size={14} /> New Asset
           </button>
@@ -3837,9 +3893,11 @@ function BackupView({ data, persist, showToast, currentUser }) {
 /* ---------------------------------------------------------
    Activity Log
 --------------------------------------------------------- */
-function ActivityLogView({ data, isAdmin, scopedLocationId }) {
+function ActivityLogView({ data, isAdmin, scopedLocationId, persist, showToast, currentUser }) {
   const [search, setSearch] = useState("");
   const [userFilter, setUserFilter] = useState("all");
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [clearConfirmText, setClearConfirmText] = useState("");
 
   // Regional Staff only ever see activity tagged with their own location
   // (see withLog's locationId param) — Admins see the full, unfiltered log.
@@ -3868,6 +3926,14 @@ function ActivityLogView({ data, isAdmin, scopedLocationId }) {
     return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   };
 
+  const clearLog = () => {
+    const count = (data.auditLog || []).length;
+    persist(withLog({ ...data, auditLog: [] }, currentUser, `Cleared the activity log (${count} entries removed)`));
+    setClearConfirmOpen(false);
+    setClearConfirmText("");
+    showToast?.("Activity log cleared.");
+  };
+
   return (
     <div>
       <div className="view-head">
@@ -3881,6 +3947,11 @@ function ActivityLogView({ data, isAdmin, scopedLocationId }) {
             <option value="all">All users</option>
             {userOptions.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
+          {isAdmin && (data.auditLog || []).length > 0 && (
+            <button type="button" className="btn ghost" onClick={() => setClearConfirmOpen(true)}>
+              <Trash2 size={14} /> Clear Log
+            </button>
+          )}
         </div>
       </div>
 
@@ -3889,6 +3960,18 @@ function ActivityLogView({ data, isAdmin, scopedLocationId }) {
           ? "Every add, edit, and delete made by any user, most recent first."
           : "Activity for assets in your location, most recent first."}
       </p>
+
+      {clearConfirmOpen && (
+        <TypeToConfirmDialog
+          title="Clear Activity Log"
+          message="This permanently clears the entire activity log for every location. If you need to keep a copy, back it up first from Backup & Restore. This cannot be undone."
+          confirmWord="CLEAR"
+          value={clearConfirmText}
+          onChange={setClearConfirmText}
+          onCancel={() => { setClearConfirmOpen(false); setClearConfirmText(""); }}
+          onConfirm={clearLog}
+        />
+      )}
 
       <div className="panel">
         <div className="table-wrap">
@@ -4194,11 +4277,22 @@ function GlobalStyles() {
       .health-ring-pct { font-size: 19px; font-weight: 700; font-family: 'Poppins', sans-serif; color: #10B981; }
       .health-ring-label { font-size: 10px; color: var(--text-soft); }
 
-      .warranty-stats { display: flex; padding: 8px 12px 18px; }
-      .warranty-stat { flex: 1; text-align: center; padding: 8px; }
-      .warranty-stat-icon { width: 30px; height: 30px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; }
-      .warranty-stat-value { font-size: 19px; font-weight: 700; font-family: 'Poppins', sans-serif; }
-      .warranty-stat-label { font-size: 10.5px; color: var(--text-soft); line-height: 1.3; margin-top: 3px; }
+      .warranty-stats { display: flex; padding: 6px 8px 14px; }
+      .warranty-stat { flex: 1; text-align: center; padding: 4px; min-width: 0; }
+      .warranty-stat-icon { width: 24px; height: 24px; border-radius: 7px; display: flex; align-items: center; justify-content: center; margin: 0 auto 6px; }
+      .warranty-stat-value { font-size: 16px; font-weight: 700; font-family: 'Poppins', sans-serif; }
+      .warranty-stat-label { font-size: 9.5px; color: var(--text-soft); line-height: 1.25; margin-top: 2px; }
+
+      /* Purchase / Asset Value panel */
+      .value-total { padding: 14px 18px 2px; }
+      .value-total-amount { display: block; font-size: 21px; font-weight: 700; font-family: 'Poppins', sans-serif; }
+      .value-total-label { font-size: 10.5px; color: var(--text-soft); }
+      .value-bar-list { list-style: none; margin: 0; padding: 12px 18px 16px; display: flex; flex-direction: column; gap: 9px; }
+      .value-bar-row { display: grid; grid-template-columns: 78px 1fr 56px; align-items: center; gap: 8px; font-size: 11px; }
+      .value-bar-label { color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .value-bar-track { height: 6px; border-radius: 999px; background: var(--bg); overflow: hidden; }
+      .value-bar-fill { height: 100%; border-radius: 999px; }
+      .value-bar-amount { text-align: right; font-weight: 600; }
 
       .activity-list { list-style: none; margin: 0; padding: 6px 0; }
       .activity-item { display: flex; align-items: center; gap: 10px; padding: 9px 18px; }
