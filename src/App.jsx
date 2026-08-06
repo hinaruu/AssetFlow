@@ -658,8 +658,26 @@ export default function App() {
   }
 
   const isAdmin = currentUser.role === "Admin";
+  // A Regional Admin is scoped to a single location just like Regional Staff,
+  // but is trusted to delete assets in that location without anyone's
+  // approval, and is the one who approves/rejects Regional Staff deletion
+  // requests for that same location (see locationApprover / ApprovalsView).
+  const isRegionalAdmin = currentUser.role === "Regional Admin";
+  const canDeleteDirectly = isAdmin || isRegionalAdmin;
   const scopedLocationId = isAdmin ? null : currentUser.locationId;
-  const pendingCount = data.assets.filter((a) => a.pendingDeletion).length;
+
+  // Who a pending deletion request for a given location should be routed
+  // to: the Regional Admin assigned to that location if one exists,
+  // otherwise the Overall Admin as a fallback. Recomputed live off the
+  // current user list, so adding/removing a Regional Admin immediately
+  // changes where new AND already-pending requests are routed.
+  const locationApprover = (locationId) => data.users.find((u) => u.role === "Regional Admin" && u.locationId === locationId) || null;
+
+  const pendingCount = isAdmin
+    ? data.assets.filter((a) => a.pendingDeletion && !locationApprover(a.locationId)).length
+    : isRegionalAdmin
+    ? data.assets.filter((a) => a.pendingDeletion && a.locationId === currentUser.locationId).length
+    : 0;
 
   return (
     <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
@@ -671,6 +689,7 @@ export default function App() {
           view={view}
           setView={setView}
           isAdmin={isAdmin}
+          isRegionalAdmin={isRegionalAdmin}
           pendingCount={pendingCount}
         />
         <div className="main">
@@ -695,6 +714,8 @@ export default function App() {
                 data={data}
                 persist={persist}
                 isAdmin={isAdmin}
+                isRegionalAdmin={isRegionalAdmin}
+                canDeleteDirectly={canDeleteDirectly}
                 scopedLocationId={scopedLocationId}
                 showToast={showToast}
                 currentUser={currentUser}
@@ -720,8 +741,8 @@ export default function App() {
             {view === "activity" && (
               <ActivityLogView data={data} isAdmin={isAdmin} scopedLocationId={scopedLocationId} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
-            {view === "approvals" && isAdmin && (
-              <ApprovalsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
+            {view === "approvals" && (isAdmin || isRegionalAdmin) && (
+              <ApprovalsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} isAdmin={isAdmin} isRegionalAdmin={isRegionalAdmin} />
             )}
           </div>
         </div>
@@ -734,7 +755,7 @@ export default function App() {
 /* ---------------------------------------------------------
    Sidebar
 --------------------------------------------------------- */
-function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
+function Sidebar({ open, onToggle, view, setView, isAdmin, isRegionalAdmin, pendingCount }) {
   const items = [
     { id: "dashboard", label: "Overview", icon: LayoutDashboard },
     { id: "assets", label: "Assets", icon: Package },
@@ -746,7 +767,7 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, pendingCount }) {
       { id: "backup", label: "Backup & Restore", icon: Download },
     ] : []),
     { id: "activity", label: "Activity Log", icon: ShieldCheck },
-    ...(isAdmin ? [
+    ...(isAdmin || isRegionalAdmin ? [
       { id: "approvals", label: "Approvals", icon: AlertTriangle, badge: pendingCount },
     ] : []),
   ];
@@ -1336,7 +1357,7 @@ function emptyAsset(defaultLocationId) {
   };
 }
 
-function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, currentUser, focusAssetId, onFocusHandled }) {
+function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly, scopedLocationId, showToast, currentUser, focusAssetId, onFocusHandled }) {
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -1501,10 +1522,10 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
       { id: "inUse", label: "In Use", count: inUseCount, color: STATUS_COLORS["In Use"] },
       { id: "underRepair", label: "Under repair", count: underRepairCount, color: STATUS_COLORS["Under Repair"] },
       { id: "needsAttention", label: "Needs attention", count: needsAttentionCount, color: "#EF4444" },
-      ...(isAdmin ? [{ id: "pendingApproval", label: "Pending approval", count: pendingApprovalCount, color: "#8B5CF6" }] : []),
+      ...(isAdmin || isRegionalAdmin ? [{ id: "pendingApproval", label: "Pending approval", count: pendingApprovalCount, color: "#8B5CF6" }] : []),
       { id: "retiredDisposed", label: "Retired / Disposed", count: retiredDisposedCount, color: STATUS_COLORS["Disposed"] },
     ].filter((p) => p.id === "all" || p.count > 0 || presetFilter === p.id);
-  }, [activeAssetsBase, disposedAssetsBase, assetAlertMap, isAdmin, presetFilter]);
+  }, [activeAssetsBase, disposedAssetsBase, assetAlertMap, isAdmin, isRegionalAdmin, presetFilter]);
 
   // If the active preset's items all get resolved (e.g. every repair is
   // closed out) and the chip disappears, fall back to "all" instead of
@@ -1917,11 +1938,17 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     showToast("Asset transferred.");
   };
 
-  // Non-admins can't delete outright — they submit a reason, and the asset
-  // is flagged for the Admin to approve or reject under "Approvals".
+  // Regional Staff can't delete outright — they submit a reason, and the
+  // asset is flagged pending. Who that flag is actually waiting on is
+  // resolved dynamically (see locationApprover in the parent component):
+  // the Regional Admin assigned to the asset's location if one exists,
+  // otherwise the Overall Admin as a fallback. We don't bake a fixed
+  // approver into the request itself, so if a Regional Admin is added or
+  // removed later, an already-pending request re-routes automatically.
   const submitDeleteRequest = async () => {
     if (!deleteReason.trim()) { alert("Please enter a reason for this deletion request."); return; }
     const asset = data.assets.find((a) => a.id === requestDeleteTarget);
+    const approverName = data.users.find((u) => u.role === "Regional Admin" && u.locationId === asset?.locationId)?.name;
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === requestDeleteTarget
@@ -1931,11 +1958,16 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
     persist(next);
     setRequestDeleteTarget(null);
     setDeleteReason("");
-    showToast("Deletion request sent for Admin approval.");
+    showToast(approverName ? `Deletion request sent to ${approverName} for approval.` : "Deletion request sent for Admin approval.");
   };
 
+  // Overall Admin and Regional Admin can delete an asset in their own
+  // location immediately, at their own discretion — no approval needed.
+  // Regional Staff always has to submit a request instead (see above).
+  // This intentionally only touches the single-asset delete path — Bulk
+  // Delete (further below) stays Admin-only and unchanged.
   const startDelete = (asset) => {
-    if (isAdmin) {
+    if (canDeleteDirectly) {
       setConfirmDelete(asset.id);
     } else if (!asset.pendingDeletion) {
       setRequestDeleteTarget(asset.id);
@@ -2320,8 +2352,12 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
         <Modal title="Request Deletion" onClose={() => { setRequestDeleteTarget(null); setDeleteReason(""); }} width={760}>
           <div className="form-grid">
             <div className="form-full hint-box">
-              This asset won't be deleted right away — your request and reason go to an
-              Admin for approval first.
+              This asset won't be deleted right away — your request and reason go to{" "}
+              {(() => {
+                const asset = data.assets.find((a) => a.id === requestDeleteTarget);
+                const approver = data.users.find((u) => u.role === "Regional Admin" && u.locationId === asset?.locationId);
+                return approver ? `${approver.name} (Regional Admin)` : "the Overall Admin";
+              })()} for approval first.
             </div>
             <div className="form-full">
               <Field label="Reason for deletion">
@@ -2341,6 +2377,7 @@ function AssetsView({ data, persist, isAdmin, scopedLocationId, showToast, curre
           categories={data.categories}
           locations={data.locations}
           isAdmin={isAdmin}
+          canDeleteDirectly={canDeleteDirectly}
           comments={(data.comments || []).filter((c) => c.assetId === viewing.id)}
           maintenance={data.maintenance.filter((m) => m.assetId === viewing.id)}
           currentUser={currentUser}
@@ -2902,7 +2939,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, isAdmin, comments, maintenance, currentUser, onAddComment, onClose, onDelete }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDirectly, comments, maintenance, currentUser, onAddComment, onClose, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const [commentText, setCommentText] = useState("");
@@ -3078,8 +3115,8 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, comments, mai
           type="button"
           className="btn danger-outline"
           onClick={onDelete}
-          title={!isAdmin && asset.pendingDeletion ? "Awaiting Admin approval" : "Delete"}
-          disabled={!isAdmin && !!asset.pendingDeletion}
+          title={!canDeleteDirectly && asset.pendingDeletion ? "Awaiting approval" : "Delete"}
+          disabled={!canDeleteDirectly && !!asset.pendingDeletion}
         >
           <Trash2 size={14} /> Delete
         </button>
@@ -3551,7 +3588,7 @@ function UsersView({ data, persist, showToast, currentUser }) {
                     <td data-label="Name">{u.name}</td>
                     <td data-label="Position">{u.position || "—"}</td>
                     <td className="mono" data-label="Username">{u.username}</td>
-                    <td data-label="Role"><Badge color={u.role === "Admin" ? "#6366F1" : "#10B981"}>{u.role}</Badge></td>
+                    <td data-label="Role"><Badge color={u.role === "Admin" ? "#6366F1" : u.role === "Regional Admin" ? "#F59E0B" : "#10B981"}>{u.role}</Badge></td>
                     <td data-label="Location">{loc?.name || "— (Global)"}</td>
                     <td className="actions-cell">
                       <div className="row-actions">
@@ -3578,6 +3615,7 @@ function UsersView({ data, persist, showToast, currentUser }) {
             <Field label="Role">
               <select value={editing.role} onChange={(e) => setEditing({ ...editing, role: e.target.value })}>
                 <option value="Admin">Admin</option>
+                <option value="Regional Admin">Regional Admin</option>
                 <option value="Regional Staff">Regional Staff</option>
               </select>
             </Field>
@@ -3587,6 +3625,11 @@ function UsersView({ data, persist, showToast, currentUser }) {
                   {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                 </select>
               </Field>
+            )}
+            {editing.role === "Regional Admin" && (
+              <div className="form-full hint-box">
+                Deletion requests from Regional Staff assigned to this same location will be sent to this person for approval, instead of the Overall Admin.
+              </div>
             )}
             {!editing.id && (
               <Field label="Temporary Password">
@@ -3968,8 +4011,17 @@ function ActivityLogView({ data, isAdmin, scopedLocationId, persist, showToast, 
 /* ---------------------------------------------------------
    Approvals (pending asset-deletion requests)
 --------------------------------------------------------- */
-function ApprovalsView({ data, persist, showToast, currentUser }) {
-  const pending = data.assets.filter((a) => a.pendingDeletion);
+function ApprovalsView({ data, persist, showToast, currentUser, isAdmin, isRegionalAdmin }) {
+  // Each pending request is routed dynamically: a Regional Admin only ever
+  // sees (and can act on) requests for their own location, while the
+  // Overall Admin only sees requests for locations that currently have no
+  // Regional Admin assigned — i.e. the ones nobody else can approve. This
+  // is recomputed from the live user list every render, so adding or
+  // removing a Regional Admin immediately changes who a request appears
+  // in front of, even for requests that were already pending.
+  const pending = isRegionalAdmin
+    ? data.assets.filter((a) => a.pendingDeletion && a.locationId === currentUser.locationId)
+    : data.assets.filter((a) => a.pendingDeletion && !data.users.some((u) => u.role === "Regional Admin" && u.locationId === a.locationId));
 
   const approve = async (asset) => {
     const removedLogs = data.maintenance.filter((m) => m.assetId === asset.id).length;
@@ -4003,8 +4055,9 @@ function ApprovalsView({ data, persist, showToast, currentUser }) {
         <h2 className="view-title">Approvals</h2>
       </div>
       <p className="export-hint">
-        Deletion requests from Regional Staff wait here until you approve or reject them.
-        Nothing is removed until you say so.
+        {isRegionalAdmin
+          ? "Deletion requests from Regional Staff in your location wait here until you approve or reject them. Nothing is removed until you say so."
+          : "Deletion requests from Regional Staff in locations without a Regional Admin wait here until you approve or reject them. Locations with a Regional Admin are handled by them directly. Nothing is removed until you say so."}
       </p>
 
       {pending.length === 0 ? (
@@ -4019,6 +4072,11 @@ function ApprovalsView({ data, persist, showToast, currentUser }) {
               <Badge color="#EF4444">Pending Deletion</Badge>
             </div>
             <div style={{ padding: "18px" }}>
+              {!isRegionalAdmin && (
+                <p className="login-sub" style={{ margin: "0 0 6px" }}>
+                  <strong>Location:</strong> {data.locations.find((l) => l.id === a.locationId)?.name || "Unknown"} (no Regional Admin assigned)
+                </p>
+              )}
               <p className="login-sub" style={{ margin: "0 0 6px" }}>
                 <strong>Requested by:</strong> {a.pendingDeletion.requestedByName} on {formatWhen(a.pendingDeletion.requestedAt)}
               </p>
