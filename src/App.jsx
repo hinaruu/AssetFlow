@@ -3085,8 +3085,8 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
           <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
           {step > 0 && <button type="button" className="btn ghost" onClick={goBack}>Back</button>}
           {step < WIZARD_STEPS.length - 1
-            ? <button type="button" className="btn primary" onClick={goNext}>Next</button>
-            : <button type="submit" className="btn primary">{asset.id ? "Save Changes" : "Create Asset"}</button>}
+            ? <button key="next-btn" type="button" className="btn primary" onClick={goNext}>Next</button>
+            : <button key="submit-btn" type="submit" className="btn primary">{asset.id ? "Save Changes" : "Create Asset"}</button>}
         </div>
       </form>
     </Modal>
