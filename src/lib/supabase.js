@@ -102,8 +102,12 @@ const TABLES = {
   },
   auditLog: {
     table: "audit_log",
-    toRow: (e) => ({ id: e.id, at: e.at, user_id: e.userId || null, user_name: e.userName || null, message: e.message || null, location_id: e.locationId || null }),
-    fromRow: (r) => ({ id: r.id, at: r.at, userId: r.user_id, userName: r.user_name, message: r.message, locationId: r.location_id }),
+    // asset_id is only ever set for entries that relate to a single asset
+    // (see withLog in App.jsx) — it powers the broader Overall Admin /
+    // Regional Admin asset-activity notification feed and is never shown
+    // in the Activity Log itself, so that view's behavior is unchanged.
+    toRow: (e) => ({ id: e.id, at: e.at, user_id: e.userId || null, user_name: e.userName || null, message: e.message || null, location_id: e.locationId || null, asset_id: e.assetId || null }),
+    fromRow: (r) => ({ id: r.id, at: r.at, userId: r.user_id, userName: r.user_name, message: r.message, locationId: r.location_id, assetId: r.asset_id }),
   },
   comments: {
     table: "comments",
@@ -121,6 +125,17 @@ const TABLES = {
       targetUserIds: r.target_user_ids || [],
       readBy: r.read_by || [],
     }),
+  },
+  // Per-user "last viewed" timestamp for a given asset. This is what
+  // powers the asset-activity notification badges/bell for Overall Admin
+  // and Regional Admin (see computeAssetActivityFeed / withAssetRead in
+  // App.jsx) — comparing an asset's latest activity timestamp against the
+  // current user's row here is how "unread" is determined, and it's what
+  // gets updated the moment they open that asset.
+  notificationReads: {
+    table: "notification_reads",
+    toRow: (r) => ({ id: r.id, user_id: r.userId || null, asset_id: r.assetId || null, last_read_at: r.lastReadAt || null }),
+    fromRow: (r) => ({ id: r.id, userId: r.user_id, assetId: r.asset_id, lastReadAt: r.last_read_at }),
   },
 };
 

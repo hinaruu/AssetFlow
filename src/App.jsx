@@ -47,7 +47,10 @@ function nextAutoTag(assets) {
 // Staff's Recent Activity / Activity Log show only their own country's
 // activity — entries with no locationId (category/location/user/backup
 // admin actions) are only ever visible to Admins anyway.
-function withLog(data, currentUser, message, locationId = null) {
+// assetId (when the entry is about a single asset) is only ever used
+// internally to power the asset-activity notification feed below — it's
+// never shown in the Activity Log itself, so that view is unchanged.
+function withLog(data, currentUser, message, locationId = null, assetId = null) {
   const entry = {
     id: uid("log"),
     at: new Date().toISOString(),
@@ -55,9 +58,76 @@ function withLog(data, currentUser, message, locationId = null) {
     userName: currentUser?.name || "Unknown",
     message,
     locationId: locationId || null,
+    assetId: assetId || null,
   };
   const auditLog = [entry, ...(data.auditLog || [])].slice(0, 300);
   return { ...data, auditLog };
+}
+
+/* ---------------------------------------------------------
+   Asset activity notifications (Overall Admin / Regional Admin)
+
+   Complements the Activity Log without changing it. Every asset-tagged
+   audit log entry (status/assignment/disposal/edit/transfer/maintenance,
+   etc — see the assetId argument on withLog calls below) plus every
+   comment is treated as one "activity event" for its asset. An asset
+   counts as unread for a user when it has an event newer than that
+   user's notification_reads row for it (see withAssetRead) — so multiple
+   updates naturally accumulate as unread until the asset is opened again,
+   with no per-event bookkeeping needed.
+
+   Comment events deliberately come only from the comments table (the
+   "Commented on asset" audit log entry for the same action is left
+   untagged — see addComment) so a single comment isn't counted twice.
+--------------------------------------------------------- */
+function computeAssetActivityFeed(auditLog, comments) {
+  const events = [];
+  (auditLog || []).forEach((e) => {
+    if (!e.assetId) return;
+    events.push({ assetId: e.assetId, at: e.at, message: e.message });
+  });
+  (comments || []).forEach((c) => {
+    if (!c.assetId) return;
+    events.push({ assetId: c.assetId, at: c.at, message: `${c.authorName || "Someone"} commented: "${c.message}"` });
+  });
+  events.sort((a, b) => new Date(b.at) - new Date(a.at));
+  return events;
+}
+
+// Groups activity events by asset, keeping only ones newer than the
+// user's last-read timestamp for that asset (unread) and within scope
+// (inScope receives an assetId and returns whether the current user
+// should be notified about that asset at all — see NOTIFICATION SCOPE
+// in TopBar/AssetsView). Returns a Map<assetId, { latest, count }>.
+function computeUnreadAssetActivity(events, notificationReads, userId, inScope) {
+  const readMap = new Map(
+    (notificationReads || [])
+      .filter((r) => r.userId === userId)
+      .map((r) => [r.assetId, r.lastReadAt])
+  );
+  const byAsset = new Map();
+  events.forEach((e) => {
+    if (!inScope(e.assetId)) return;
+    const lastRead = readMap.get(e.assetId);
+    if (lastRead && new Date(e.at) <= new Date(lastRead)) return;
+    const entry = byAsset.get(e.assetId);
+    if (!entry) byAsset.set(e.assetId, { latest: e, count: 1 });
+    else entry.count += 1;
+  });
+  return byAsset;
+}
+
+// Marks an asset as "seen" by a user right now — used both when a
+// notification is clicked and when the asset's detail view is opened.
+function withAssetRead(data, userId, assetId) {
+  if (!userId || !assetId) return data;
+  const id = `ntr-${userId}-${assetId}`;
+  const now = new Date().toISOString();
+  const exists = (data.notificationReads || []).some((r) => r.id === id);
+  const notificationReads = exists
+    ? (data.notificationReads || []).map((r) => (r.id === id ? { ...r, lastReadAt: now } : r))
+    : [...(data.notificationReads || []), { id, userId, assetId, lastReadAt: now }];
+  return { ...data, notificationReads };
 }
 
 // Marks an asset "Under Repair", remembering its prior status so it can be
@@ -824,6 +894,12 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   const [notifOpen, setNotifOpen] = useState(false);
   const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
   const isAdmin = currentUser.role === "Admin";
+  // NOTIFICATION SCOPE — Overall Admin gets asset activity across every
+  // location; Regional Admin gets it for their own location (their own
+  // actions plus Regional Staff's within it). Regional Staff keeps the
+  // original targeted-comment notifications below, unchanged.
+  const isRegionalAdmin = currentUser.role === "Regional Admin";
+  const broadNotifScope = isAdmin || isRegionalAdmin;
   const locName = scopedLocationId
     ? locations.find((l) => l.id === scopedLocationId)?.name
     : "All Locations (HQ)";
@@ -857,19 +933,46 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   const alerts = useMemo(() => allAlerts.filter((a) => !readAlertIds.includes(a.id)), [allAlerts, readAlertIds]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
   const myComments = useMemo(
-    () => (data.comments || []).filter((c) => {
+    () => (broadNotifScope ? [] : (data.comments || []).filter((c) => {
       if (!(c.targetUserIds || []).includes(currentUser.id) || (c.readBy || []).includes(currentUser.id)) return false;
       // Live access check: even if targetUserIds was set at comment time,
       // an asset that has since been transferred away from this user's
-      // location should no longer surface a notification for it (admins
-      // always retain access).
-      if (isAdmin) return true;
+      // location should no longer surface a notification for it.
       const asset = data.assets.find((a) => a.id === c.assetId);
       return !!asset && asset.locationId === scopedLocationId;
-    }).sort((a, b) => new Date(b.at) - new Date(a.at)),
-    [data.comments, data.assets, currentUser.id, isAdmin, scopedLocationId]
+    }).sort((a, b) => new Date(b.at) - new Date(a.at))),
+    [data.comments, data.assets, currentUser.id, scopedLocationId, broadNotifScope]
   );
-  const notifCount = alerts.length + myComments.length;
+
+  // Overall Admin / Regional Admin: any significant update on any asset in
+  // scope (comments, notes, chat, status/assignment changes, disposal —
+  // see computeAssetActivityFeed), grouped per asset so it reads as "this
+  // asset has N new updates" rather than one row per event.
+  const assetActivityEvents = useMemo(
+    () => (broadNotifScope ? computeAssetActivityFeed(data.auditLog, data.comments) : []),
+    [data.auditLog, data.comments, broadNotifScope]
+  );
+  const activityScopeAssetIds = useMemo(() => {
+    if (!broadNotifScope || isAdmin) return null; // null = every asset (Overall Admin)
+    return new Set(data.assets.filter((a) => a.locationId === scopedLocationId).map((a) => a.id));
+  }, [data.assets, broadNotifScope, isAdmin, scopedLocationId]);
+  const unreadActivityMap = useMemo(() => {
+    if (!broadNotifScope) return new Map();
+    return computeUnreadAssetActivity(
+      assetActivityEvents,
+      data.notificationReads,
+      currentUser.id,
+      (assetId) => activityScopeAssetIds === null || activityScopeAssetIds.has(assetId)
+    );
+  }, [broadNotifScope, assetActivityEvents, data.notificationReads, currentUser.id, activityScopeAssetIds]);
+  const activityNotifs = useMemo(
+    () => Array.from(unreadActivityMap.entries())
+      .map(([assetId, info]) => ({ assetId, ...info }))
+      .sort((a, b) => new Date(b.latest.at) - new Date(a.latest.at)),
+    [unreadActivityMap]
+  );
+
+  const notifCount = alerts.length + myComments.length + activityNotifs.length;
 
   const markCommentRead = (commentId) => {
     if (!persist) return;
@@ -885,6 +988,12 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
     markCommentRead(comment.id);
     setNotifOpen(false);
     if (onOpenAsset) onOpenAsset(comment.assetId);
+  };
+
+  const openAssetActivity = (assetId) => {
+    if (persist) persist(withAssetRead(data, currentUser.id, assetId));
+    setNotifOpen(false);
+    if (onOpenAsset) onOpenAsset(assetId);
   };
 
   const initials = currentUser.name.split(" ").map((s) => s[0]).slice(0, 2).join("");
@@ -908,7 +1017,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
               <div className="notif-backdrop" onClick={() => setNotifOpen(false)} />
               <div className="notif-panel">
                 <div className="notif-section-title">Needs Attention</div>
-                {alerts.length === 0 && myComments.length === 0 && (
+                {alerts.length === 0 && myComments.length === 0 && activityNotifs.length === 0 && (
                   <div className="notif-empty">You're all caught up.</div>
                 )}
                 {alerts.slice(0, 8).map((a) => (
@@ -940,6 +1049,22 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
                       {isReplyToMe
                         ? <>{c.authorName} replied to your comment on Asset #{asset?.tag || "—"}</>
                         : <>{c.authorName} commented on Asset #{asset?.tag || "—"}</>}
+                    </button>
+                  );
+                })}
+                {activityNotifs.slice(0, 10).map((n) => {
+                  const asset = data.assets.find((a) => a.id === n.assetId);
+                  return (
+                    <button
+                      key={n.assetId}
+                      type="button"
+                      className="notif-item notif-item-btn"
+                      onClick={() => openAssetActivity(n.assetId)}
+                      title="View asset"
+                    >
+                      {n.count > 1
+                        ? <>Asset #{asset?.tag || "—"} — {n.count} new updates, latest: {n.latest.message}</>
+                        : <>Asset #{asset?.tag || "—"} — {n.latest.message}</>}
                     </button>
                   );
                 })}
@@ -1396,10 +1521,16 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     if (onFocusHandled) onFocusHandled();
   }, [focusAssetId, data.assets, onFocusHandled, isAdmin, scopedLocationId]);
 
-  // Assets with an unread comment for the current user — shown as a small
-  // indicator in the table so the person who added an asset notices right
-  // away that there's an update on it.
+  // NOTIFICATION SCOPE — Overall Admin and Regional Admin see a badge for
+  // ANY significant update on an asset in their scope (comments, notes,
+  // chat, status/assignment changes, disposal — see
+  // computeAssetActivityFeed), not just comments addressed to them.
+  // Regional Staff's notifications are unchanged: still just comments
+  // that targeted them specifically.
+  const broadActivityScope = isAdmin || isRegionalAdmin;
+
   const unreadCommentAssetIds = useMemo(() => {
+    if (broadActivityScope) return new Set();
     const set = new Set();
     (data.comments || []).forEach((c) => {
       if ((c.targetUserIds || []).includes(currentUser.id) && !(c.readBy || []).includes(currentUser.id)) {
@@ -1407,7 +1538,25 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       }
     });
     return set;
-  }, [data.comments, currentUser.id]);
+  }, [data.comments, currentUser.id, broadActivityScope]);
+
+  const assetActivityEvents = useMemo(
+    () => (broadActivityScope ? computeAssetActivityFeed(data.auditLog, data.comments) : []),
+    [data.auditLog, data.comments, broadActivityScope]
+  );
+  // Regional Admin's activity feed is limited to assets currently in their
+  // own location — recomputed live off data.assets, same as everywhere
+  // else location scoping happens in this app.
+  const regionalActivityAssetIds = useMemo(() => {
+    if (isAdmin || !broadActivityScope) return null;
+    return new Set(data.assets.filter((a) => a.locationId === scopedLocationId).map((a) => a.id));
+  }, [data.assets, isAdmin, broadActivityScope, scopedLocationId]);
+  const unreadActivityAssetIds = useMemo(() => {
+    if (!broadActivityScope) return unreadCommentAssetIds;
+    const inScope = (assetId) => isAdmin || (regionalActivityAssetIds && regionalActivityAssetIds.has(assetId));
+    const map = computeUnreadAssetActivity(assetActivityEvents, data.notificationReads, currentUser.id, inScope);
+    return new Set(map.keys());
+  }, [broadActivityScope, assetActivityEvents, data.notificationReads, currentUser.id, isAdmin, regionalActivityAssetIds, unreadCommentAssetIds]);
 
   // Assets with an upcoming/overdue warranty or calibration issue — same
   // source data as the notification bell, mapped by asset id so the table
@@ -1442,6 +1591,16 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewing?.id]);
+
+  // Same as above, but for the broader Overall Admin / Regional Admin
+  // asset-activity notifications (see broadActivityScope) — opening the
+  // asset counts as having seen its latest activity.
+  useEffect(() => {
+    if (!viewing || !broadActivityScope) return;
+    if (!unreadActivityAssetIds.has(viewing.id)) return;
+    persist(withAssetRead(data, currentUser.id, viewing.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewing?.id, broadActivityScope]);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [requestDeleteTarget, setRequestDeleteTarget] = useState(null); // asset id awaiting a reason
   const [deleteReason, setDeleteReason] = useState("");
@@ -1644,7 +1803,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
         ...data,
         assets: data.assets.map((a) => (a.id === assetFields.id ? finalAsset : a)),
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
-      }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`, finalAsset.locationId);
+      }, currentUser, `Edited asset "${assetFields.name || assetFields.tag}"${autoMaint ? " — added maintenance entry (status: Under Repair)" : ""}`, finalAsset.locationId, finalAsset.id);
     } else {
       let newAsset = {
         ...assetFields,
@@ -1664,7 +1823,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
         ...data,
         assets: [newAsset, ...data.assets],
         maintenance: autoMaint ? [autoMaint, ...data.maintenance] : data.maintenance,
-      }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`, newAsset.locationId);
+      }, currentUser, `Added asset "${newAsset.name || newAsset.tag}"`, newAsset.locationId, newAsset.id);
     }
     persist(next);
     setEditing(null);
@@ -1718,7 +1877,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
-    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${newStatus}"`, finalAsset.locationId);
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "${newStatus}"`, finalAsset.locationId, finalAsset.id);
     persist(next);
     showToast("Status updated.");
   };
@@ -1735,7 +1894,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
-    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "In Use"`, finalAsset.locationId);
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "In Use"`, finalAsset.locationId, finalAsset.id);
     persist(next);
     setInUsePromptAsset(null);
     showToast("Status updated.");
@@ -1763,7 +1922,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
-    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "Disposed" — reason: ${disposeReason.trim()}`, finalAsset.locationId);
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "Disposed" — reason: ${disposeReason.trim()}`, finalAsset.locationId, finalAsset.id);
     persist(next);
     setDisposePromptAsset(null);
     showToast("Status updated.");
@@ -1781,7 +1940,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? finalAsset : a)),
       maintenance: [newEntry, ...data.maintenance],
-    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "Under Repair" — added maintenance entry`, finalAsset.locationId);
+    }, currentUser, `Changed status of asset "${asset.name || asset.tag}" to "Under Repair" — added maintenance entry`, finalAsset.locationId, finalAsset.id);
     persist(next);
     setMaintPromptAsset(null);
     showToast("Status updated — added to Maintenance.");
@@ -1827,17 +1986,19 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
 
   // Posts a comment on an asset. Notifies every user account currently
   // assigned to manage that asset's location/country (e.g. Eve Yew for
-  // Singapore) plus admins, and anyone who has already commented in this
-  // asset's thread AND still has access to the asset's current location
-  // (so a reply reaches whoever it's replying to) — since those are the
-  // only people with app access who should hear about it. The "Assigned
-  // To" field is just free text for an employee with no app account, so
-  // it's never notified.
+  // Singapore) plus every Overall Admin, and anyone who has already
+  // commented in this asset's thread AND still has access to the asset's
+  // current location (so a reply reaches whoever it's replying to) —
+  // since those are the only people with app access who should hear
+  // about it. The "Assigned To" field is just free text for an employee
+  // with no app account, so it's never notified.
   //
-  // Deliberately does NOT unconditionally include the asset's original
-  // creator or every past commenter: once an asset is transferred to a
-  // different location, whoever isn't an admin or currently assigned to
-  // the new location should stop hearing about it.
+  // Overall Admins are always included, regardless of location, per the
+  // asset-notification scope: Admin sees activity everywhere. Deliberately
+  // does NOT unconditionally include the asset's original creator or
+  // every past commenter: once an asset is transferred to a different
+  // location, whoever isn't an admin or currently assigned to the new
+  // location should stop hearing about it.
   const addComment = (assetId, message) => {
     const text = (message || "").trim();
     if (!text) return;
@@ -1846,6 +2007,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       const u = data.users.find((x) => x.id === userId);
       return !!u && (u.role === "Admin" || (u.locationId && u.locationId === asset?.locationId));
     };
+    const adminUserIds = data.users.filter((u) => u.role === "Admin").map((u) => u.id);
     const locationUserIds = data.users
       .filter((u) => u.locationId && u.locationId === asset?.locationId)
       .map((u) => u.id);
@@ -1855,7 +2017,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       .filter(hasCurrentAccess);
     const createdById = hasCurrentAccess(asset?.createdById) ? asset?.createdById : null;
     const targetUserIds = Array.from(new Set(
-      [createdById, ...locationUserIds, ...priorParticipantIds].filter((id) => id && id !== currentUser.id)
+      [createdById, ...adminUserIds, ...locationUserIds, ...priorParticipantIds].filter((id) => id && id !== currentUser.id)
     ));
     const comment = {
       id: uid("cmt"),
@@ -1867,6 +2029,10 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       targetUserIds,
       readBy: [],
     };
+    // Deliberately not tagged with assetId here — the comment row above
+    // already feeds the asset-activity notification system (see
+    // computeAssetActivityFeed), so tagging this entry too would double
+    // up the same comment as two separate activity events.
     const next = withLog({
       ...data,
       comments: [comment, ...(data.comments || [])],
@@ -1950,7 +2116,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       assets: data.assets.map((a) => (a.id === transferTarget
         ? { ...a, locationId: destLocationId, assignedTo: newAssignedTo, transferHistory: [transferEntry, ...(a.transferHistory || [])] }
         : a)),
-    }, currentUser, logBits.join(" — "), destLocationId);
+    }, currentUser, logBits.join(" — "), destLocationId, asset.id);
     persist(next);
     setTransferTarget(null);
     setTransferReason("");
@@ -1974,7 +2140,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       assets: data.assets.map((a) => (a.id === requestDeleteTarget
         ? { ...a, pendingDeletion: { requestedBy: currentUser.id, requestedByName: currentUser.name, reason: deleteReason.trim(), requestedAt: new Date().toISOString() } }
         : a)),
-    }, currentUser, `Requested deletion of asset "${asset?.name || asset?.tag}" — reason: ${deleteReason.trim()}`, asset?.locationId);
+    }, currentUser, `Requested deletion of asset "${asset?.name || asset?.tag}" — reason: ${deleteReason.trim()}`, asset?.locationId, asset?.id);
     persist(next);
     setRequestDeleteTarget(null);
     setDeleteReason("");
@@ -2185,10 +2351,12 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
         <Plus size={22} />
       </button>
 
-      {(assetAlertMap.size > 0 || unreadCommentAssetIds.size > 0) && (
+      {(assetAlertMap.size > 0 || unreadActivityAssetIds.size > 0) && (
         <div className="table-legend">
-          {unreadCommentAssetIds.size > 0 && (
-            <span className="table-legend-item"><MessageCircle size={13} className="comment-flag" /> New comment</span>
+          {unreadActivityAssetIds.size > 0 && (
+            <span className="table-legend-item">
+              <MessageCircle size={13} className="comment-flag" /> {broadActivityScope ? "New activity" : "New comment"}
+            </span>
           )}
           {assetAlertMap.size > 0 && (
             <>
@@ -2268,8 +2436,8 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
                     </td>
                     <td data-label="Asset Tag">
                       <span className="link-tag" title="View details, history & comments">{a.tag}</span>
-                      {unreadCommentAssetIds.has(a.id) && (
-                        <MessageCircle size={13} className="comment-flag" title="New comment on this asset" />
+                      {unreadActivityAssetIds.has(a.id) && (
+                        <MessageCircle size={13} className="comment-flag" title={broadActivityScope ? "New activity on this asset" : "New comment on this asset"} />
                       )}
                       {assetAlertMap.has(a.id) && (() => {
                         const info = assetAlertMap.get(a.id);
@@ -3316,13 +3484,13 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
       const assets = log.status === "Done"
         ? maybeRestoreStatus(data.assets, maintenance, log.assetId)
         : markUnderRepair(data.assets, log.assetId);
-      next = withLog({ ...data, assets, maintenance }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`, logAsset?.locationId);
+      next = withLog({ ...data, assets, maintenance }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`, logAsset?.locationId, log.assetId);
     } else {
       const newEntry = { ...log, id: uid("maint") };
       const maintenance = [newEntry, ...data.maintenance];
       const assets = newEntry.status === "Done" ? data.assets : markUnderRepair(data.assets, newEntry.assetId);
       const becameUnderRepair = newEntry.status !== "Done" && data.assets.find((a) => a.id === newEntry.assetId)?.status !== "Under Repair";
-      next = withLog({ ...data, assets, maintenance }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}${becameUnderRepair ? " — asset set to Under Repair" : ""}`, logAsset?.locationId);
+      next = withLog({ ...data, assets, maintenance }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}${becameUnderRepair ? " — asset set to Under Repair" : ""}`, logAsset?.locationId, log.assetId);
     }
     persist(next);
     setEditing(null);
@@ -3334,7 +3502,7 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
     const logAsset = data.assets.find((a) => a.id === log?.assetId);
     const maintenance = data.maintenance.filter((m) => m.id !== id);
     const assets = maybeRestoreStatus(data.assets, maintenance, log?.assetId);
-    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`, logAsset?.locationId);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`, logAsset?.locationId, log?.assetId);
     persist(next);
     setConfirmDelete(null);
     showToast("Maintenance entry deleted.");
@@ -3358,7 +3526,7 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
     const assets = status === "Done"
       ? maybeRestoreStatus(data.assets, maintenance, log?.assetId)
       : markUnderRepair(data.assets, log?.assetId);
-    const next = withLog({ ...data, assets, maintenance }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`, logAsset?.locationId);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`, logAsset?.locationId, log?.assetId);
     persist(next);
   };
 
@@ -4196,7 +4364,7 @@ function ApprovalsView({ data, persist, showToast, currentUser, isAdmin, isRegio
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? { ...a, pendingDeletion: null } : a)),
-    }, currentUser, `Rejected deletion request for asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}`, asset.locationId);
+    }, currentUser, `Rejected deletion request for asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}`, asset.locationId, asset.id);
     persist(next);
     showToast("Deletion request rejected — asset kept.");
   };
