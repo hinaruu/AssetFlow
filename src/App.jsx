@@ -186,6 +186,7 @@ function parseCell(value, fallback) {
 }
 
 const CONDITION_OPTIONS = ["New", "Good", "Fair", "Poor"];
+const CONDITION_COLORS = { "New": "#3B82F6", "Good": "#10B981", "Fair": "#F59E0B", "Poor": "#EF4444" };
 const DISPOSAL_REASON_OPTIONS = [
   "End of Life (EOL)", "Hardware failure", "Motherboard failure", "Damaged beyond repair",
   "Lost / Stolen", "Obsolete / Replaced", "Other",
@@ -1008,24 +1009,15 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   };
   const pct = (n) => (assets.length ? Math.round((n / assets.length) * 100) : 0);
 
-  // Asset Health: a derived read on the fleet's condition, built from data
-  // that's already tracked (Condition, status, and the same warranty/
-  // calibration alerts the notification bell uses) rather than inventing a
-  // new field — Critical is anything actually down or in poor shape, Needs
-  // Attention is anything with an upcoming warranty/calibration issue or
-  // fair condition, everything else counts as Healthy.
-  const alerts = useMemo(() => computeAlerts(assets, null), [assets]);
-  const alertAssetIds = useMemo(() => new Set(alerts.map((a) => a.id.replace(/-[wc]$/, ""))), [alerts]);
-  const health = useMemo(() => {
-    let healthy = 0, attention = 0, critical = 0;
-    assets.forEach((a) => {
-      if (a.status === "Under Repair" || a.condition === "Poor") critical += 1;
-      else if (alertAssetIds.has(a.id) || a.condition === "Fair") attention += 1;
-      else healthy += 1;
-    });
-    return { healthy, attention, critical };
-  }, [assets, alertAssetIds]);
-  const healthyPct = assets.length ? Math.round((health.healthy / assets.length) * 100) : 0;
+  // Asset Condition: a direct read of the Condition field, nothing else —
+  // Status already has its own "Assets by Status" chart and warranty/
+  // calibration already has its own overview panel, so mixing those into
+  // this too just made "Critical" mean two different things at once.
+  const conditionData = useMemo(() => {
+    const counts = {};
+    assets.forEach((a) => { counts[a.condition] = (counts[a.condition] || 0) + 1; });
+    return CONDITION_OPTIONS.map((name) => ({ name, value: counts[name] || 0 })).filter((d) => d.value > 0);
+  }, [assets]);
 
   // Warranty Overview: real counts from each IT asset's warrantyExpiry date
   // (assets without a tracked warranty — "N/A" or blank — are excluded).
@@ -1123,38 +1115,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
       <div className={`charts-row ${isAdmin ? "charts-row-4" : "charts-row-3"}`}>
         <DonutCard title="Assets by Status" data={statusData} palette={STATUS_COLORS} total={assets.length} />
         <DonutCard title="Assets by Category" data={categoryData} palette={categoryPalette} total={assets.length} />
-        <div className="panel chart-card health-panel">
-          <div className="panel-head"><h3>Asset Health</h3></div>
-          <div className="health-body">
-            <div className="health-ring-wrap">
-              <ResponsiveContainer width={110} height={110}>
-                <PieChart>
-                  <Pie
-                    data={[
-                      { name: "Healthy", value: health.healthy },
-                      { name: "Needs Attention", value: health.attention },
-                      { name: "Critical", value: health.critical },
-                    ].filter((d) => d.value > 0)}
-                    dataKey="value" nameKey="name" innerRadius={38} outerRadius={52} startAngle={90} endAngle={-270} paddingAngle={health.healthy && (health.attention || health.critical) ? 3 : 0}
-                  >
-                    <Cell fill="#10B981" />
-                    <Cell fill="#F59E0B" />
-                    <Cell fill="#EF4444" />
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="health-ring-center">
-                <div className="health-ring-pct">{assets.length ? `${healthyPct}%` : "—"}</div>
-                <div className="health-ring-label">Healthy</div>
-              </div>
-            </div>
-            <ul className="legend-list">
-              <li><span className="legend-dot" style={{ background: "#10B981" }} /><span className="legend-name">Healthy</span><span className="legend-count">{health.healthy}</span></li>
-              <li><span className="legend-dot" style={{ background: "#F59E0B" }} /><span className="legend-name">Needs Attention</span><span className="legend-count">{health.attention}</span></li>
-              <li><span className="legend-dot" style={{ background: "#EF4444" }} /><span className="legend-name">Critical</span><span className="legend-count">{health.critical}</span></li>
-            </ul>
-          </div>
-        </div>
+        <DonutCard title="Asset Condition" data={conditionData} palette={CONDITION_COLORS} total={assets.length} />
         {isAdmin && (
           <DonutCard title="Assets by Location" data={locationData} palette={locationPalette} total={data.assets.length} />
         )}
@@ -1201,7 +1162,7 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
         </div>
 
         <div className="panel">
-          <div className="panel-head"><h3>Purchase / Asset Value</h3></div>
+          <div className="panel-head"><h3>Asset Value</h3></div>
           <div className="value-total">
             <span className="value-total-amount">${totalValue.toLocaleString()}</span>
             <span className="value-total-label">Total recorded value{isAdmin ? ", all locations" : ""}</span>
@@ -3155,18 +3116,19 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
 
   const save = async (log) => {
     let next;
+    const logAsset = data.assets.find((a) => a.id === log.assetId);
     if (log.id) {
       const maintenance = data.maintenance.map((m) => (m.id === log.id ? log : m));
       const assets = log.status === "Done"
         ? maybeRestoreStatus(data.assets, maintenance, log.assetId)
         : markUnderRepair(data.assets, log.assetId);
-      next = withLog({ ...data, assets, maintenance }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`);
+      next = withLog({ ...data, assets, maintenance }, currentUser, `Edited maintenance entry for ${assetLabel(log.assetId)}`, logAsset?.locationId);
     } else {
       const newEntry = { ...log, id: uid("maint") };
       const maintenance = [newEntry, ...data.maintenance];
       const assets = newEntry.status === "Done" ? data.assets : markUnderRepair(data.assets, newEntry.assetId);
       const becameUnderRepair = newEntry.status !== "Done" && data.assets.find((a) => a.id === newEntry.assetId)?.status !== "Under Repair";
-      next = withLog({ ...data, assets, maintenance }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}${becameUnderRepair ? " — asset set to Under Repair" : ""}`);
+      next = withLog({ ...data, assets, maintenance }, currentUser, `Added maintenance entry for ${assetLabel(log.assetId)}${becameUnderRepair ? " — asset set to Under Repair" : ""}`, logAsset?.locationId);
     }
     persist(next);
     setEditing(null);
@@ -3175,9 +3137,10 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
 
   const remove = async (id) => {
     const log = data.maintenance.find((m) => m.id === id);
+    const logAsset = data.assets.find((a) => a.id === log?.assetId);
     const maintenance = data.maintenance.filter((m) => m.id !== id);
     const assets = maybeRestoreStatus(data.assets, maintenance, log?.assetId);
-    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted maintenance entry for ${assetLabel(log?.assetId)}`, logAsset?.locationId);
     persist(next);
     setConfirmDelete(null);
     showToast("Maintenance entry deleted.");
@@ -3188,7 +3151,7 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
     const maintenance = data.maintenance.filter((m) => !selected.includes(m.id));
     let assets = data.assets;
     affectedAssetIds.forEach((aid) => { assets = maybeRestoreStatus(assets, maintenance, aid); });
-    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted ${selected.length} maintenance entry(ies) in bulk`);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Deleted ${selected.length} maintenance entry(ies) in bulk`, scopedLocationId);
     persist(next);
     showToast(`${selected.length} entry(ies) deleted.`);
     setSelected([]);
@@ -3196,11 +3159,12 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
 
   const quickStatus = async (id, status) => {
     const log = data.maintenance.find((m) => m.id === id);
+    const logAsset = data.assets.find((a) => a.id === log?.assetId);
     const maintenance = data.maintenance.map((m) => (m.id === id ? { ...m, status } : m));
     const assets = status === "Done"
       ? maybeRestoreStatus(data.assets, maintenance, log?.assetId)
       : markUnderRepair(data.assets, log?.assetId);
-    const next = withLog({ ...data, assets, maintenance }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`);
+    const next = withLog({ ...data, assets, maintenance }, currentUser, `Changed maintenance status for ${assetLabel(log?.assetId)} to "${status}"`, logAsset?.locationId);
     persist(next);
   };
 
@@ -4014,7 +3978,7 @@ function ApprovalsView({ data, persist, showToast, currentUser }) {
       ...data,
       assets: data.assets.filter((a) => a.id !== asset.id),
       maintenance: data.maintenance.filter((m) => m.assetId !== asset.id),
-    }, currentUser, `Approved deletion of asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}${suffix}`);
+    }, currentUser, `Approved deletion of asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}${suffix}`, asset.locationId);
     persist(next);
     showToast("Deletion approved.");
   };
@@ -4023,7 +3987,7 @@ function ApprovalsView({ data, persist, showToast, currentUser }) {
     const next = withLog({
       ...data,
       assets: data.assets.map((a) => (a.id === asset.id ? { ...a, pendingDeletion: null } : a)),
-    }, currentUser, `Rejected deletion request for asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}`);
+    }, currentUser, `Rejected deletion request for asset "${asset.name || asset.tag}" — requested by ${asset.pendingDeletion.requestedByName}`, asset.locationId);
     persist(next);
     showToast("Deletion request rejected — asset kept.");
   };
@@ -4194,7 +4158,17 @@ function GlobalStyles() {
       .detail-side-section + .detail-side-section { border-top: 1px solid var(--border); }
       .detail-side-section:first-child { padding-top: 0; }
 
-      .notes-highlight { background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 8px; padding: 9px 11px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; }
+      .notes-highlight {
+        position: relative; background: #FEF9C3; color: #713F12; border: 1px solid #FDE68A;
+        border-radius: 3px 10px 10px 10px; padding: 12px 14px; font-size: 12.5px; line-height: 1.55;
+        white-space: pre-wrap; box-shadow: 0 3px 8px rgba(0,0,0,0.10), 0 1px 2px rgba(0,0,0,0.06);
+        transform: rotate(-0.6deg);
+      }
+      .notes-highlight::before {
+        content: ""; position: absolute; top: 0; right: 0; width: 0; height: 0;
+        border-style: solid; border-width: 0 14px 14px 0; border-color: transparent rgba(113,63,18,0.16) transparent transparent;
+        border-radius: 0 3px 0 10px;
+      }
 
       .maint-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
       .maint-history-item { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
@@ -4271,11 +4245,6 @@ function GlobalStyles() {
 
       .bottom-row { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 14px; align-items: start; }
       .bottom-row-2 { grid-template-columns: 1.1fr 1fr; }
-      .health-body { display: flex; align-items: center; gap: 12px; padding: 8px 14px 16px; }
-      .health-ring-wrap { position: relative; width: 110px; height: 110px; flex-shrink: 0; }
-      .health-ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-      .health-ring-pct { font-size: 19px; font-weight: 700; font-family: 'Poppins', sans-serif; color: #10B981; }
-      .health-ring-label { font-size: 10px; color: var(--text-soft); }
 
       .warranty-stats { display: flex; padding: 6px 8px 14px; }
       .warranty-stat { flex: 1; text-align: center; padding: 4px; min-width: 0; }
@@ -4367,9 +4336,27 @@ function GlobalStyles() {
       .field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-soft); font-weight: 500; }
       .field input, .field select, .field textarea {
         border: 1px solid var(--border); border-radius: 7px; padding: 7px 10px; font-size: 13.5px;
-        background: var(--bg); color: var(--text); font-family: inherit;
+        background: var(--bg); color: var(--text); font-family: inherit; transition: border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .field input:hover, .field select:hover, .field textarea:hover, .sort-select:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+      .field input:focus, .field select:focus, .field textarea:focus, .sort-select:focus {
+        outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
       }
       .field input:disabled, .field select:disabled, .field textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+      /* Every native <select> in the app — Category/Status/Type fields,
+         table filters, etc. — gets the same custom chevron and hover/focus
+         treatment as the rest of the UI instead of the browser default. */
+      .field select, .sort-select {
+        appearance: none; -webkit-appearance: none; -moz-appearance: none;
+        cursor: pointer; padding-right: 30px;
+        background-repeat: no-repeat; background-position: right 10px center; background-size: 15px;
+      }
+      .theme-light .field select, .theme-light .sort-select {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      }
+      .theme-dark .field select, .theme-dark .sort-select {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      }
       .field-hint { display: block; margin-top: 5px; font-size: 11.5px; color: var(--text-soft); }
       .field-inline { display: flex; gap: 6px; flex-wrap: wrap; }
       .field-inline input { flex: 1; min-width: 120px; }
