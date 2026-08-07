@@ -8,25 +8,11 @@ import {
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import * as XLSX from "xlsx";
-import { fetchOrgData, saveOrgData, subscribeToOrgData } from "./lib/supabase.js";
+import { fetchOrgData, saveOrgData, subscribeToOrgData, supabase } from "./lib/supabase.js";
 
 /* ---------------------------------------------------------
    Helpers
 --------------------------------------------------------- */
-// Synchronous string hash (cyrb53) — used instead of the Web Crypto API,
-// which is unreliable inside sandboxed artifact preview environments.
-function sha256(text) {
-  const str = String(text ?? "");
-  let h1 = 0xdeadbeef ^ 0, h2 = 0x41c6ce57 ^ 0;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
-}
 const uid = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const todayISO = () => new Date().toISOString().split("T")[0];
 
@@ -521,8 +507,8 @@ function Field({ label, children, required, className, action }) {
 /* ---------------------------------------------------------
    Login Screen
 --------------------------------------------------------- */
-function LoginScreen({ users, onLogin }) {
-  const [username, setUsername] = useState("");
+function LoginScreen() {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -532,20 +518,20 @@ function LoginScreen({ users, onLogin }) {
     setError("");
     setBusy(true);
     try {
-      if (!username.trim() || !password) {
-        setError("Enter both username and password.");
+      if (!email.trim() || !password) {
+        setError("Enter both email and password.");
         return;
       }
-      const hash = sha256(password);
-      const list = Array.isArray(users) ? users : [];
-      const found = list.find(
-        (u) => (u.username || "").toLowerCase() === username.trim().toLowerCase() && u.passwordHash === hash
-      );
-      if (!found) {
-        setError("Incorrect username or password.");
-        return;
+      // Real Supabase Auth sign-in — no passwords ever compared in the
+      // browser. A successful call updates the session, which the app
+      // picks up automatically via onAuthStateChange (see App()).
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (authError) {
+        setError("Incorrect email or password.");
       }
-      onLogin(found);
     } catch (err) {
       setError("Something went wrong signing in. Please try again.");
     } finally {
@@ -562,8 +548,8 @@ function LoginScreen({ users, onLogin }) {
         </div>
         <p className="login-sub">Sign in to manage IT &amp; facility assets.</p>
         <div onKeyDown={(e) => { if (e.key === "Enter") submit(e); }}>
-          <Field label="Username">
-            <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus placeholder="e.g. admin" />
+          <Field label="Email">
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus placeholder="name@company.com" />
           </Field>
           <Field label="Password">
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
@@ -573,9 +559,26 @@ function LoginScreen({ users, onLogin }) {
             {busy ? "Signing in…" : "Sign In"}
           </button>
         </div>
-        <div className="login-hint">
-          Demo admin login — <strong>admin</strong> / <strong>admin123</strong>
-        </div>
+      </div>
+    </div>
+  );
+}
+
+// Shown when someone has a valid Supabase Auth session but no matching row
+// in the `users` profile table yet (e.g. their Auth account was just
+// created and hasn't been linked). See CRITICAL-SECURITY-STEPS.md, Phase 3.
+function NoProfileScreen({ email, onSignOut }) {
+  return (
+    <div className="login-wrap">
+      <div className="login-card" style={{ textAlign: "center" }}>
+        <div className="confirm-icon"><AlertTriangle size={20} /></div>
+        <h3 style={{ marginBottom: 8 }}>Account not set up yet</h3>
+        <p className="login-sub">
+          You're signed in as <strong>{email}</strong>, but there's no matching profile for
+          you in this app yet. Ask an Admin to add your name/role/location under
+          <strong> User Accounts</strong> and link it to this login.
+        </p>
+        <button className="btn primary full" onClick={onSignOut}>Sign Out</button>
       </div>
     </div>
   );
@@ -588,7 +591,12 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [theme, setTheme] = useState("light");
   const [data, setData] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
+  // `session` is Supabase Auth's session object — undefined until the first
+  // check completes, null when signed out, an object when signed in.
+  // `currentUser` is derived from it below (the matching row in
+  // data.users), not stored as its own state — there is exactly one
+  // source of truth for "who's logged in" now: the Auth session.
+  const [session, setSession] = useState(undefined);
   const [view, setView] = useState("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast, setToast] = useState(null); // { message, phase: 'in' | 'out' }
@@ -622,18 +630,36 @@ export default function App() {
     if (!orgData) {
       if (!seedIfEmpty) return null;
       orgData = seedData();
-      const adminHash = sha256("admin123");
-      const staffHash = sha256("hr12345");
-      orgData.users = [
-        { id: "usr-admin", name: "System Administrator", username: "admin", email: "admin@company.com", position: "IT Systems Admin", passwordHash: adminHash, role: "Admin", locationId: null },
-        { id: "usr-staff", name: "Staff User", username: "staff", email: "staff@company.com", position: "Staff", passwordHash: staffHash, role: "Regional Staff", locationId: "loc-main" },
-      ];
+      // No demo user accounts are seeded here anymore — logins are real
+      // Supabase Auth accounts now, which can't be created from the
+      // browser with just the anon key. Create your first Admin account
+      // per CRITICAL-SECURITY-STEPS.md (Phase 3) instead.
+      orgData.users = [];
       await saveOrgData(orgData);
     }
     return orgData;
   }, []);
 
-  // Load persisted state on mount
+  // Tracks the Supabase Auth session — this is the actual security
+  // boundary now (paired with RLS policies keyed off auth.uid()), not
+  // just app state. onAuthStateChange fires on sign-in, sign-out, and
+  // token refresh, so this always reflects the real session.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // The signed-in user's profile — found by matching the Auth session's
+  // user id against users.authUserId (see UsersView for how that link is
+  // made). null while there's no session, or if the session has no
+  // matching profile row yet.
+  const currentUser = useMemo(() => {
+    if (!session || !data) return null;
+    return data.users.find((u) => u.authUserId === session.user.id) || null;
+  }, [session, data]);
+
+  // Load persisted UI prefs on mount — independent of auth, always safe.
   useEffect(() => {
     try {
       const t = localStorage.getItem("theme-pref");
@@ -641,27 +667,51 @@ export default function App() {
       const s = localStorage.getItem("sidebar-pref");
       if (s) setSidebarOpen(s === "open");
     } catch {}
+  }, []);
 
+  // Load the org's data — only once there's a real signed-in session.
+  // RLS now requires auth.uid() to be set for reads on every table, so
+  // fetching before sign-in would just get blocked; there's also nothing
+  // useful to show pre-login anymore since the login screen no longer
+  // needs `data.users` (it calls Supabase Auth directly). Resets back to
+  // "not loaded" on sign-out so a different account's session doesn't
+  // reuse stale data.
+  useEffect(() => {
+    if (session === undefined) return; // still checking for a session
+    if (!session) {
+      setData(null);
+      setConnectionError(null);
+      setLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    setLoaded(false);
     (async () => {
       try {
         const orgData = await loadFromCloud({ seedIfEmpty: true });
+        if (cancelled) return;
         const { data: migrated, changed } = migrateRetiredToDisposed(orgData);
         setData(migrated);
         setConnectionError(null);
         setLastSynced(new Date());
         if (changed) saveOrgData(migrated, orgData).catch(() => {});
       } catch (err) {
-        setConnectionError(err?.message || "Could not connect to the database.");
+        if (!cancelled) setConnectionError(err?.message || "Could not connect to the database.");
       } finally {
-        setLoaded(true);
+        if (!cancelled) setLoaded(true);
       }
     })();
-  }, [loadFromCloud]);
+    return () => { cancelled = true; };
+  }, [session, loadFromCloud]);
 
   // Live feed: any change anyone saves is pushed here automatically —
   // no manual sync needed. The Sync button still works as a manual
-  // fallback (e.g. right after reconnecting).
+  // fallback (e.g. right after reconnecting). Only subscribes once
+  // signed in — Realtime enforces the same RLS policies as regular
+  // queries, so an anonymous subscription wouldn't receive anything
+  // anyway, and would just churn reconnect attempts.
   useEffect(() => {
+    if (!session) return;
     const unsubscribe = subscribeToOrgData((next) => {
       const { data: migrated, changed } = migrateRetiredToDisposed(next);
       setData(migrated);
@@ -669,7 +719,7 @@ export default function App() {
       if (changed) saveOrgData(migrated, next).catch(() => {});
     });
     return unsubscribe;
-  }, []);
+  }, [session]);
 
   // Save org data to the shared database whenever it changes locally
   const persist = useCallback(async (next) => {
@@ -705,7 +755,7 @@ export default function App() {
     if (meta) meta.setAttribute("content", theme === "dark" ? "#12141A" : "#3B82F6");
   }, [theme]);
 
-  if (!loaded) {
+  if (!loaded || session === undefined) {
     return <div className="boot"><div className="spinner" /></div>;
   }
 
@@ -733,11 +783,20 @@ export default function App() {
     );
   }
 
+  if (session && !currentUser) {
+    return (
+      <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
+        <GlobalStyles />
+        <NoProfileScreen email={session.user.email} onSignOut={() => supabase.auth.signOut()} />
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
       <div className={theme === "dark" ? "theme-dark" : "theme-light"}>
         <GlobalStyles />
-        <LoginScreen users={data.users} onLogin={setCurrentUser} />
+        <LoginScreen />
       </div>
     );
   }
@@ -782,7 +841,7 @@ export default function App() {
             theme={theme}
             toggleTheme={toggleTheme}
             currentUser={currentUser}
-            onLogout={() => setCurrentUser(null)}
+            onLogout={() => supabase.auth.signOut()}
             onToggleSidebar={toggleSidebar}
             locations={data.locations}
             scopedLocationId={scopedLocationId}
@@ -3859,12 +3918,11 @@ function LocationsView({ data, persist, showToast, currentUser }) {
    Users View
 --------------------------------------------------------- */
 function emptyUser(locations) {
-  return { id: null, name: "", username: "", email: "", position: "", role: "Regional Staff", locationId: locations[0]?.id || "", password: "" };
+  return { id: null, name: "", username: "", email: "", position: "", role: "Regional Staff", locationId: locations[0]?.id || "" };
 }
 
 function UsersView({ data, persist, showToast, currentUser }) {
   const [editing, setEditing] = useState(null);
-  const [resetTarget, setResetTarget] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const save = async (form) => {
@@ -3872,12 +3930,18 @@ function UsersView({ data, persist, showToast, currentUser }) {
       const next = withLog({ ...data, users: data.users.map((u) => (u.id === form.id ? { ...u, name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId } : u)) }, currentUser, `Edited user "${form.name}"`);
       persist(next);
     } else {
-      const hash = await sha256(form.password || "changeme123");
-      const newUser = { id: uid("usr"), name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId, passwordHash: hash };
+      // This only creates the profile row (name/role/location) — it does
+      // NOT create a login. Creating real Auth accounts requires the
+      // service_role key, which must never reach the browser, so that
+      // step happens in the Supabase dashboard (Authentication → Users →
+      // Invite) using the same email, then the resulting account is
+      // linked to this profile — see the hint shown below the form and
+      // CRITICAL-SECURITY-STEPS.md (Phase 3/6).
+      const newUser = { id: uid("usr"), name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId, authUserId: null };
       persist(withLog({ ...data, users: [...data.users, newUser] }, currentUser, `Added user "${newUser.name}" (${newUser.role})`));
     }
     setEditing(null);
-    showToast("User saved.");
+    showToast(form.id ? "User saved." : "Profile created — invite them in Supabase to finish setup.");
   };
 
   const remove = async (id) => {
@@ -3887,12 +3951,16 @@ function UsersView({ data, persist, showToast, currentUser }) {
     showToast("User removed.");
   };
 
-  const resetPassword = async (id, newPass) => {
-    const hash = await sha256(newPass);
-    const u = data.users.find((x) => x.id === id);
-    persist(withLog({ ...data, users: data.users.map((u) => (u.id === id ? { ...u, passwordHash: hash } : u)) }, currentUser, `Reset password for "${u?.name}"`));
-    setResetTarget(null);
-    showToast("Password reset.");
+  // Sends a real Supabase Auth password-reset email — this is a safe,
+  // anon-key-compatible call (no service_role needed), unlike creating an
+  // account outright. Requires the user to already have a linked Auth
+  // account (authUserId set) with this email.
+  const sendPasswordReset = async (u) => {
+    if (!u.email) { alert("This user has no email on file — add one first."); return; }
+    if (!u.authUserId) { alert("This account isn't linked to a login yet — see the setup hint when adding a user."); return; }
+    const { error } = await supabase.auth.resetPasswordForEmail(u.email);
+    if (error) { showToast("Couldn't send reset email — check your connection."); return; }
+    showToast(`Password reset email sent to ${u.email}.`);
   };
 
   return (
@@ -3918,7 +3986,7 @@ function UsersView({ data, persist, showToast, currentUser }) {
                     <td className="actions-cell">
                       <div className="row-actions">
                         <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing({ ...u })} />
-                        <IconBtn icon={KeyRound} title="Reset Password" onClick={() => setResetTarget(u.id)} />
+                        <IconBtn icon={KeyRound} title={u.authUserId ? "Send Password Reset Email" : "Not linked to a login yet"} onClick={() => sendPasswordReset(u)} />
                         <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(u.id)} />
                       </div>
                     </td>
@@ -3957,9 +4025,12 @@ function UsersView({ data, persist, showToast, currentUser }) {
               </div>
             )}
             {!editing.id && (
-              <Field label="Temporary Password">
-                <input type="text" value={editing.password} onChange={(e) => setEditing({ ...editing, password: e.target.value })} placeholder="e.g. changeme123" />
-              </Field>
+              <div className="form-full hint-box">
+                This creates their profile only. To give them a real login: after saving,
+                invite <strong>{editing.email || "their email"}</strong> in Supabase →
+                Authentication → Users → Invite, then run the linking step from
+                CRITICAL-SECURITY-STEPS.md (Phase 6) so this profile connects to that login.
+              </div>
             )}
             <div className="form-full modal-actions">
               <button type="button" className="btn ghost" onClick={() => setEditing(null)}>Cancel</button>
@@ -3969,6 +4040,10 @@ function UsersView({ data, persist, showToast, currentUser }) {
                 onClick={() => {
                   if (!editing.name.trim() || !editing.username.trim()) {
                     alert("Please enter both a full name and username.");
+                    return;
+                  }
+                  if (!editing.id && !editing.email.trim()) {
+                    alert("Please enter an email — it's needed to link their login.");
                     return;
                   }
                   save(editing);
@@ -3981,9 +4056,6 @@ function UsersView({ data, persist, showToast, currentUser }) {
         </Modal>
       )}
 
-      {resetTarget && (
-        <ResetPasswordModal onClose={() => setResetTarget(null)} onConfirm={(pass) => resetPassword(resetTarget, pass)} />
-      )}
       {confirmDelete && (
         <ConfirmDialog message="Remove this user's access?" onCancel={() => setConfirmDelete(null)} onConfirm={() => remove(confirmDelete)} />
       )}
@@ -4028,7 +4100,7 @@ function buildBackupWorkbook(data) {
 
   addSheet("Users", (data.users || []).map((u) => ({
     id: u.id, name: u.name, username: u.username, email: u.email, position: u.position,
-    passwordHash: u.passwordHash, role: u.role, locationId: u.locationId || "",
+    authUserId: u.authUserId || "", role: u.role, locationId: u.locationId || "",
   })));
 
   addSheet("Comments", (data.comments || []).map((c) => ({
@@ -4073,7 +4145,7 @@ function parseBackupWorkbook(wb) {
 
   const users = sheetRows(wb, "Users").map((r) => ({
     id: String(r.id), name: r.name, username: r.username, email: r.email, position: r.position,
-    passwordHash: r.passwordHash, role: r.role, locationId: r.locationId ? String(r.locationId) : null,
+    authUserId: r.authUserId || null, role: r.role, locationId: r.locationId ? String(r.locationId) : null,
   }));
 
   const comments = sheetRows(wb, "Comments").map((r) => ({
@@ -4417,25 +4489,6 @@ function ApprovalsView({ data, persist, showToast, currentUser, isAdmin, isRegio
         ))
       )}
     </div>
-  );
-}
-
-function ResetPasswordModal({ onClose, onConfirm }) {
-  const [pass, setPass] = useState("");
-  const submit = () => {
-    if (!pass) { alert("Please enter a new password."); return; }
-    onConfirm(pass);
-  };
-  return (
-    <Modal title="Reset Password" onClose={onClose} width={380}>
-      <div className="form-grid" onKeyDown={(e) => { if (e.key === "Enter") submit(); }}>
-        <Field label="New Password"><input type="text" value={pass} onChange={(e) => setPass(e.target.value)} autoFocus /></Field>
-        <div className="form-full modal-actions">
-          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" onClick={submit}>Set Password</button>
-        </div>
-      </div>
-    </Modal>
   );
 }
 

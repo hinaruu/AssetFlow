@@ -42,14 +42,17 @@ const TABLES = {
   },
   users: {
     table: "users",
+    // Credentials now live in Supabase Auth (auth.users), not here — this
+    // table only stores the profile (role/location) and a link to the
+    // matching Auth account via auth_user_id. See CRITICAL-SECURITY-STEPS.md.
     toRow: (u) => ({
       id: u.id, name: u.name, username: u.username, email: u.email || null,
       position: u.position || null, role: u.role,
-      location_id: u.locationId || null, password_hash: u.passwordHash,
+      location_id: u.locationId || null, auth_user_id: u.authUserId || null,
     }),
     fromRow: (r) => ({
       id: r.id, name: r.name, username: r.username, email: r.email,
-      position: r.position, role: r.role, locationId: r.location_id, passwordHash: r.password_hash,
+      position: r.position, role: r.role, locationId: r.location_id, authUserId: r.auth_user_id,
     }),
   },
   assets: {

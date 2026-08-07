@@ -12,8 +12,9 @@ if there's no internet, the app tells you instead of silently failing.
 - When anyone saves a change, it's written straight back to that same database.
 - The **🔄 Sync** button in the top bar re-fetches the latest data on demand,
   in case someone else made changes elsewhere.
-- Login is username/password (kept in the shared data), with **Admin** vs
-  **Regional Staff** roles already built in — Admin sees and edits everything.
+- Login is real **Supabase Auth** (email/password), with **Admin**,
+  **Regional Admin**, and **Regional Staff** roles enforced by database-level
+  Row Level Security — see `CRITICAL-SECURITY-STEPS.md` for setup.
 
 ## 1. Create the database (5 minutes, free)
 
@@ -40,13 +41,9 @@ npm install
 npm run dev
 ```
 
-The first time it loads, it seeds the database with demo data automatically.
-
-**Demo logins:**
-- Admin — `admin` / `admin123`
-- Staff — `staff` / `hr12345`
-
-(Change these in the **Users** page once you're in as Admin.)
+The first time it loads, it seeds the database with demo locations/categories —
+but **not** a demo login. Follow `CRITICAL-SECURITY-STEPS.md` to create your
+first real Admin account.
 
 ## 3. Put it on GitHub Pages
 
