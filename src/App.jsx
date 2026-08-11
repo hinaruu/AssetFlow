@@ -865,6 +865,7 @@ export default function App() {
                 currentUser={currentUser}
                 focusAssetId={focusAssetId}
                 onFocusHandled={() => setFocusAssetId(null)}
+                applyLocalOnly={setData}
               />
             )}
             {view === "maintenance" && (
@@ -1556,7 +1557,7 @@ function emptyAsset(defaultLocationId) {
   };
 }
 
-function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly, scopedLocationId, showToast, currentUser, focusAssetId, onFocusHandled }) {
+function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly, scopedLocationId, showToast, currentUser, focusAssetId, onFocusHandled, applyLocalOnly }) {
   // Regional Staff can export their location's assets but never import —
   // only Admin and Regional Admin are trusted to write bulk data in.
   const canImport = isAdmin || isRegionalAdmin;
@@ -2133,7 +2134,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     setTransferReason("");
   };
 
-  const submitTransfer = () => {
+  const submitTransfer = async () => {
     const creatingLocation = transferLocationId === "__new__";
     if (creatingLocation && !isAdmin) { alert("Only an Administrator can add a new location."); return; }
     if (!transferLocationId) { alert("Please select a destination location."); return; }
@@ -2153,7 +2154,39 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     const fromLoc = data.locations.find((l) => l.id === asset.locationId)?.name || "Unknown";
     const toLoc = locations.find((l) => l.id === destLocationId)?.name || "Unknown";
     const newAssignedTo = transferAssignedTo.trim();
-    const assignedChanged = newAssignedTo !== (asset.assignedTo || "");
+
+    // A transfer moves the asset OUT of the mover's own location — for a
+    // non-admin, that means the row won't satisfy the "must stay in your
+    // own location" rule the moment it's saved, even though the move
+    // itself is exactly what's supposed to be allowed. Rather than fight
+    // that at the RLS-policy level, non-admin transfers go through a
+    // dedicated database function (transfer_asset — see
+    // critical-security-migration.sql) that does its own permission
+    // check in plain code and applies the change directly, sidestepping
+    // the conflict entirely. Admins don't hit this at all — an Admin's
+    // regular save already works, so their path is unchanged below.
+    if (!isAdmin) {
+      const { error } = await supabase.rpc("transfer_asset", {
+        p_asset_id: asset.id,
+        p_new_location_id: destLocationId,
+        p_new_assigned_to: newAssignedTo,
+        p_reason: transferReason.trim(),
+        p_by_name: currentUser.name,
+      });
+      if (error) {
+        showToast("Could not transfer this asset — check your connection and try again.");
+        return;
+      }
+      // The asset just moved outside this user's own location, so their
+      // own view can no longer include it — reflect that immediately
+      // rather than waiting on the next realtime refresh.
+      applyLocalOnly({ ...data, assets: data.assets.filter((a) => a.id !== asset.id) });
+      setTransferTarget(null);
+      setTransferReason("");
+      setTransferNewLocationName("");
+      showToast("Asset transferred.");
+      return;
+    }
 
     const transferEntry = {
       id: uid("xfer"),
@@ -2165,6 +2198,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       by: currentUser.name,
       at: new Date().toISOString(),
     };
+    const assignedChanged = newAssignedTo !== (asset.assignedTo || "");
     const logBits = [`Transferred asset "${asset.name || asset.tag}" from ${fromLoc} to ${toLoc}`];
     if (assignedChanged) logBits.push(`reassigned to ${newAssignedTo || "Unassigned"}`);
     logBits.push(`reason: ${transferReason.trim()}`);
