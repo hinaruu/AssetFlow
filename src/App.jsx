@@ -2173,6 +2173,30 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     showToast(noteId ? "Note updated." : "Note added.");
   };
 
+  // Deletes a single note. Goes through a database function rather than
+  // the normal save path — per-note authorship ("only the author, or an
+  // Admin, can delete this note") lives inside a JSON array on the asset
+  // row, which plain row-level RLS can't express, so the permission
+  // check has to happen server-side inside delete_asset_note() instead.
+  // See add-delete-note-function.sql.
+  const deleteAssetNote = async (assetId, noteId) => {
+    const { error } = await supabase.rpc("delete_asset_note", {
+      p_asset_id: assetId,
+      p_note_id: noteId,
+    });
+    if (error) {
+      showToast("Could not delete this note — check your connection and try again.");
+      return;
+    }
+    applyLocalOnly({
+      ...data,
+      assets: data.assets.map((a) => (a.id === assetId
+        ? { ...a, notesLog: (a.notesLog || []).filter((n) => n.id !== noteId) }
+        : a)),
+    });
+    showToast("Note deleted.");
+  };
+
   // Starts a "New Asset" draft. Non-admins are fixed to their own assigned
   // location, same as when duplicating — the field is locked in the modal.
   const newAssetDraft = () => ({
@@ -2815,6 +2839,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
           currentUser={currentUser}
           onAddComment={(message) => addComment(viewing.id, message)}
           onSaveNote={(noteId, text) => saveAssetNote(viewing.id, noteId, text)}
+          onDeleteNote={(noteId) => deleteAssetNote(viewing.id, noteId)}
           onClose={() => setViewing(null)}
           onDelete={() => { setViewing(null); startDelete(viewing); }}
         />
@@ -3431,13 +3456,14 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDirectly, comments, maintenance, currentUser, onAddComment, onSaveNote, onClose, onDelete }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDirectly, comments, maintenance, currentUser, onAddComment, onSaveNote, onDeleteNote, onClose, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const [commentText, setCommentText] = useState("");
   const [noteText, setNoteText] = useState("");
   const [editingNoteId, setEditingNoteId] = useState(null);
   const [editingNoteText, setEditingNoteText] = useState("");
+  const [deleteNoteId, setDeleteNoteId] = useState(null);
   const issues = useMemo(() => getAssetIssues(asset), [asset]);
   const notesLog = [...(asset.notesLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
   const canEditNote = (note) => isAdmin || note.authorId === currentUser.id;
@@ -3589,7 +3615,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
                   <div className="notif-empty">No notes yet — use this to log anything worth remembering about this asset.</div>
                 )}
                 {notesLog.map((n) => (
-                  <div key={n.id} className="note-item">
+                  <div key={n.id} className="note-item note-sticky">
                     {editingNoteId === n.id ? (
                       <>
                         <textarea
@@ -3605,16 +3631,21 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
                       </>
                     ) : (
                       <>
-                        <div className="note-text">{n.text}</div>
-                        <div className="note-meta">
-                          <span>{n.authorName}</span>
-                          <span>·</span>
-                          <span>{formatLogTime(n.at)}{n.editedAt ? " (edited)" : ""}</span>
-                          {canEditNote(n) && (
-                            <button type="button" className="note-edit-btn" onClick={() => startEditNote(n)} title="Edit note">
+                        {canEditNote(n) && (
+                          <div className="note-sticky-actions">
+                            <button type="button" className="note-icon-btn" onClick={() => startEditNote(n)} title="Edit note">
                               <Pencil size={11} />
                             </button>
-                          )}
+                            <button type="button" className="note-icon-btn note-icon-btn-danger" onClick={() => setDeleteNoteId(n.id)} title="Delete note">
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
+                        )}
+                        <div className="note-text">{n.text}</div>
+                        <div className="note-meta">
+                          <span className="note-author">{n.authorName}</span>
+                          <span>·</span>
+                          <span>{formatLogTime(n.at)}{n.editedAt ? " (edited)" : ""}</span>
                         </div>
                       </>
                     )}
@@ -3701,6 +3732,14 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
         </button>
         <button type="button" className="btn ghost" onClick={onClose}>Close</button>
       </div>
+
+      {deleteNoteId && (
+        <ConfirmDialog
+          message="Delete this note? This action cannot be undone."
+          onCancel={() => setDeleteNoteId(null)}
+          onConfirm={() => { onDeleteNote(deleteNoteId); setDeleteNoteId(null); }}
+        />
+      )}
     </Modal>
   );
 }
@@ -4820,12 +4859,24 @@ function GlobalStyles() {
         border-radius: 0 3px 0 10px;
       }
 
-      .notes-log-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; margin-bottom: 10px; padding: 4px 2px; }
-      .note-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
-      .note-text { font-size: 13px; line-height: 1.4; white-space: pre-wrap; margin-bottom: 5px; }
-      .note-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-soft); }
-      .note-edit-btn { border: none; background: none; color: var(--text-soft); cursor: pointer; padding: 2px 4px; margin-left: auto; border-radius: 4px; display: inline-flex; }
-      .note-edit-btn:hover { background: var(--surface); color: var(--text); }
+      .notes-log-list { display: flex; flex-direction: column; gap: 12px; max-height: 260px; overflow-y: auto; padding: 4px 6px 8px 2px; }
+      .note-sticky {
+        position: relative; background: #FEF9C3; color: #713F12; border: 1px solid #FDE68A;
+        border-radius: 3px 10px 10px 10px; padding: 12px 14px; font-size: 12.5px; line-height: 1.55;
+        box-shadow: 0 3px 8px rgba(0,0,0,0.10), 0 1px 2px rgba(0,0,0,0.06);
+      }
+      .note-sticky::before {
+        content: ""; position: absolute; top: 0; right: 0; width: 0; height: 0;
+        border-style: solid; border-width: 0 14px 14px 0; border-color: transparent rgba(113,63,18,0.16) transparent transparent;
+        border-radius: 0 3px 0 10px;
+      }
+      .note-sticky .note-text { white-space: pre-wrap; color: #713F12; padding-right: 34px; }
+      .note-sticky .note-meta { display: flex; align-items: center; gap: 6px; color: rgba(113,63,18,0.72); }
+      .note-sticky .note-author { font-weight: 700; color: #713F12; }
+      .note-sticky-actions { position: absolute; top: 8px; right: 10px; display: flex; gap: 2px; }
+      .note-icon-btn { border: none; background: none; color: rgba(113,63,18,0.55); cursor: pointer; padding: 3px; border-radius: 4px; display: inline-flex; }
+      .note-icon-btn:hover { background: rgba(113,63,18,0.12); color: #713F12; }
+      .note-icon-btn-danger:hover { background: rgba(220,38,38,0.14); color: #B91C1C; }
       .note-item textarea { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; background: var(--bg); color: var(--text); font-family: inherit; resize: vertical; margin-bottom: 6px; }
       .note-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
