@@ -69,6 +69,7 @@ const TABLES = {
       calibration_date: a.calibrationDate || null,
       next_calibration_date: a.nextCalibrationDate || null,
       notes: a.notes || null, pre_repair_status: a.preRepairStatus || null,
+      notes_log: a.notesLog || [],
       transfer_history: a.transferHistory || [],
       disposed_by: a.disposalInfo?.by || null,
       disposal_reason: a.disposalInfo?.reason || null,
@@ -85,6 +86,7 @@ const TABLES = {
       purchaseDate: r.purchase_date, purchaseCost: r.purchase_cost, warrantyExpiry: r.warranty_expiry,
       requiresCalibration: r.requires_calibration, calibrationDate: r.calibration_date,
       nextCalibrationDate: r.next_calibration_date, notes: r.notes,
+      notesLog: r.notes_log || [],
       preRepairStatus: r.pre_repair_status, transferHistory: r.transfer_history || [],
       disposalInfo: r.disposed_by || r.disposal_reason || r.disposed_at
         ? { by: r.disposed_by, reason: r.disposal_reason, date: r.disposed_at, at: r.disposal_logged_at }

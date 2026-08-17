@@ -195,6 +195,56 @@ function computeAlerts(assets, scopedLocationId) {
   return alerts.sort((a, b) => (b.urgent === a.urgent ? 0 : b.urgent ? 1 : -1));
 }
 
+// Per-asset version of the same warranty/calibration windows used by
+// computeAlerts(), plus condition — powers the "Needs Attention" banner
+// in the Asset Details modal. Data-driven on purpose: nobody sets this by
+// hand, it's derived fresh from the asset's own fields every time.
+function getAssetIssues(asset) {
+  const issues = [];
+  if (!asset || asset.status === "Disposed") return issues;
+  const now = new Date();
+  const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const plainDate = (v) => {
+    const d = new Date(v);
+    return isNaN(d) ? v : d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  };
+
+  if (asset.assetType === "IT" && asset.warrantyExpiry) {
+    const d = new Date(asset.warrantyExpiry);
+    if (!isNaN(d) && d <= in30) {
+      const expired = d < now;
+      issues.push({
+        severity: expired ? "critical" : "warning",
+        label: expired ? "Warranty Expired" : "Warranty Expiring Soon",
+        detail: `Warranty ${expired ? "expired" : "expires"} on ${plainDate(asset.warrantyExpiry)}.`,
+      });
+    }
+  }
+
+  if (asset.assetType === "Non-IT" && asset.requiresCalibration) {
+    const checkDate = asset.nextCalibrationDate || asset.calibrationDate;
+    if (checkDate) {
+      const d = new Date(checkDate);
+      if (!isNaN(d) && d <= in30) {
+        const overdue = d < now;
+        issues.push({
+          severity: overdue ? "critical" : "warning",
+          label: overdue ? "Calibration Overdue" : "Calibration Due Soon",
+          detail: `Calibration ${overdue ? "was due" : "is due"} on ${plainDate(checkDate)}.`,
+        });
+      }
+    }
+  }
+
+  if (asset.condition === "Poor") {
+    issues.push({ severity: "critical", label: "Poor Condition", detail: "This asset is recorded in poor condition and may need service or replacement." });
+  } else if (asset.condition === "Fair") {
+    issues.push({ severity: "warning", label: "Fair Condition", detail: "This asset is recorded in fair condition — worth keeping an eye on." });
+  }
+
+  return issues;
+}
+
 
 // Triggers a browser download for a built XLSX workbook.
 function downloadWorkbook(workbook, filename) {
@@ -1553,7 +1603,7 @@ function emptyAsset(defaultLocationId) {
     yearModel: "", serial: "", status: "", condition: "New", locationId: defaultLocationId || "",
     assignedTo: "", purchaseDate: "", purchaseCost: "", warrantyExpiry: "",
     requiresCalibration: false, calibrationDate: "", nextCalibrationDate: "",
-    notes: "", transferHistory: [], department: "", disposalInfo: null,
+    notes: "", notesLog: [], transferHistory: [], department: "", disposalInfo: null,
   };
 }
 
@@ -2101,6 +2151,28 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     showToast("Comment sent.");
   };
 
+  // Adds or edits an entry in an asset's Notes — a lightweight,
+  // timestamped operational log distinct from the Comments thread. This
+  // is a same-location field edit like any other asset update, so it
+  // goes through the normal save path rather than a special RPC.
+  const saveAssetNote = (assetId, noteId, text) => {
+    const trimmed = (text || "").trim();
+    if (!trimmed) return;
+    const asset = data.assets.find((a) => a.id === assetId);
+    if (!asset) return;
+    const now = new Date().toISOString();
+    const existing = asset.notesLog || [];
+    const notesLog = noteId
+      ? existing.map((n) => (n.id === noteId ? { ...n, text: trimmed, editedAt: now } : n))
+      : [{ id: uid("note"), text: trimmed, authorId: currentUser.id, authorName: currentUser.name, at: now, editedAt: null }, ...existing];
+    const next = withLog({
+      ...data,
+      assets: data.assets.map((a) => (a.id === assetId ? { ...a, notesLog } : a)),
+    }, currentUser, `${noteId ? "Edited a note" : "Added a note"} on asset "${asset.name || asset.tag}"`, asset.locationId, asset.id);
+    persist(next);
+    showToast(noteId ? "Note updated." : "Note added.");
+  };
+
   // Starts a "New Asset" draft. Non-admins are fixed to their own assigned
   // location, same as when duplicating — the field is locked in the modal.
   const newAssetDraft = () => ({
@@ -2117,6 +2189,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       assignedTo: "",
       status: "In Stock",
       transferHistory: [],
+      notesLog: [],
       disposalInfo: null,
       // Non-admins can't relocate a duplicated asset — it always starts
       // in their own assigned location, and the field is locked in the
@@ -2732,7 +2805,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       )}
       {viewing && (
         <AssetDetailModal
-          asset={viewing}
+          asset={data.assets.find((a) => a.id === viewing.id) || viewing}
           categories={data.categories}
           locations={data.locations}
           isAdmin={isAdmin}
@@ -2741,6 +2814,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
           maintenance={data.maintenance.filter((m) => m.assetId === viewing.id)}
           currentUser={currentUser}
           onAddComment={(message) => addComment(viewing.id, message)}
+          onSaveNote={(noteId, text) => saveAssetNote(viewing.id, noteId, text)}
           onClose={() => setViewing(null)}
           onDelete={() => { setViewing(null); startDelete(viewing); }}
         />
@@ -3357,10 +3431,28 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
 /* ---------------------------------------------------------
    Asset Detail Modal (read-only view, opened by clicking the tag)
 --------------------------------------------------------- */
-function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDirectly, comments, maintenance, currentUser, onAddComment, onClose, onDelete }) {
+function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDirectly, comments, maintenance, currentUser, onAddComment, onSaveNote, onClose, onDelete }) {
   const cat = categories.find((c) => c.id === asset.categoryId);
   const loc = locations.find((l) => l.id === asset.locationId);
   const [commentText, setCommentText] = useState("");
+  const [noteText, setNoteText] = useState("");
+  const [editingNoteId, setEditingNoteId] = useState(null);
+  const [editingNoteText, setEditingNoteText] = useState("");
+  const issues = useMemo(() => getAssetIssues(asset), [asset]);
+  const notesLog = [...(asset.notesLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+  const canEditNote = (note) => isAdmin || note.authorId === currentUser.id;
+  const submitNote = () => {
+    if (!noteText.trim()) return;
+    onSaveNote(null, noteText);
+    setNoteText("");
+  };
+  const startEditNote = (note) => { setEditingNoteId(note.id); setEditingNoteText(note.text); };
+  const saveEditNote = () => {
+    if (!editingNoteText.trim()) return;
+    onSaveNote(editingNoteId, editingNoteText);
+    setEditingNoteId(null);
+    setEditingNoteText("");
+  };
   // Most recent maintenance first, so the newest work on this device is
   // what you see right away.
   const maintHistory = [...(maintenance || [])].sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -3414,6 +3506,26 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
         <span className="detail-hero-chip"><MapPin size={12} /> {loc?.name || "No location"}</span>
         {asset.assignedTo && <span className="detail-hero-chip"><User size={12} /> {asset.assignedTo}</span>}
       </div>
+
+      {issues.length > 0 && (
+        <div className="attention-banner">
+          <div className="attention-banner-title">
+            <AlertTriangle size={15} />
+            {issues.length === 1 ? issues[0].label : `${issues.length} Issues Require Attention`}
+          </div>
+          <div className="attention-banner-list">
+            {issues.map((issue, i) => (
+              <div key={i} className={`attention-item attention-${issue.severity}`}>
+                <span className="attention-dot" />
+                <div>
+                  {issues.length > 1 && <div className="attention-item-label">{issue.label}</div>}
+                  <div className="attention-item-detail">{issue.detail}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="detail-layout">
         <div className="detail-main">
@@ -3471,7 +3583,56 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
 
         <div className="detail-side">
           {sideSection("Notes", (
-            <div className="notes-highlight">{asset.notes || "No notes yet."}</div>
+            <div className="comments-section">
+              <div className="notes-log-list">
+                {notesLog.length === 0 && (
+                  <div className="notif-empty">No notes yet — use this to log anything worth remembering about this asset.</div>
+                )}
+                {notesLog.map((n) => (
+                  <div key={n.id} className="note-item">
+                    {editingNoteId === n.id ? (
+                      <>
+                        <textarea
+                          value={editingNoteText}
+                          onChange={(e) => setEditingNoteText(e.target.value)}
+                          rows={2}
+                          autoFocus
+                        />
+                        <div className="note-edit-actions">
+                          <button type="button" className="btn ghost" onClick={() => setEditingNoteId(null)}>Cancel</button>
+                          <button type="button" className="btn primary" onClick={saveEditNote} disabled={!editingNoteText.trim()}>Save</button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="note-text">{n.text}</div>
+                        <div className="note-meta">
+                          <span>{n.authorName}</span>
+                          <span>·</span>
+                          <span>{formatLogTime(n.at)}{n.editedAt ? " (edited)" : ""}</span>
+                          {canEditNote(n) && (
+                            <button type="button" className="note-edit-btn" onClick={() => startEditNote(n)} title="Edit note">
+                              <Pencil size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="comment-composer">
+                <textarea
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                  rows={2}
+                  placeholder="Add a note…"
+                />
+                <button type="button" className="btn primary" onClick={submitNote} disabled={!noteText.trim()}>
+                  Add Note
+                </button>
+              </div>
+            </div>
           ))}
 
           {sideSection("Service & Maintenance History", (
@@ -4123,6 +4284,7 @@ function buildBackupWorkbook(data) {
     requiresCalibration: a.requiresCalibration ? "Yes" : "No",
     calibrationDate: a.calibrationDate, nextCalibrationDate: a.nextCalibrationDate,
     preRepairStatus: a.preRepairStatus || "", notes: a.notes,
+    notesLog: cellify(a.notesLog || []),
     transferHistory: cellify(a.transferHistory || []),
     pendingDeletion: cellify(a.pendingDeletion || null),
     disposalInfo: cellify(a.disposalInfo || null),
@@ -4167,6 +4329,7 @@ function parseBackupWorkbook(wb) {
     requiresCalibration: String(r.requiresCalibration).toLowerCase() === "yes",
     calibrationDate: r.calibrationDate, nextCalibrationDate: r.nextCalibrationDate,
     preRepairStatus: r.preRepairStatus || null, notes: r.notes,
+    notesLog: parseCell(r.notesLog, []),
     transferHistory: parseCell(r.transferHistory, []),
     pendingDeletion: parseCell(r.pendingDeletion, null),
     disposalInfo: parseCell(r.disposalInfo, null),
@@ -4613,6 +4776,21 @@ function GlobalStyles() {
          (right) run side by side so the modal reads across, not down. */
       .detail-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
       .detail-hero-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+
+      .attention-banner { background: var(--bg); border: 1px solid var(--border); border-left: 3px solid #EF4444; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+      .attention-banner-title { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700; color: #B91C1C; text-transform: uppercase; letter-spacing: 0.02em; }
+      .theme-dark .attention-banner-title { color: #FCA5A5; }
+      .attention-banner-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+      .attention-item { display: flex; align-items: flex-start; gap: 8px; }
+      .attention-dot { width: 7px; height: 7px; border-radius: 999px; margin-top: 5px; flex-shrink: 0; }
+      .attention-critical .attention-dot { background: #EF4444; }
+      .attention-warning .attention-dot { background: #F59E0B; }
+      .attention-item-label { font-size: 12.5px; font-weight: 700; }
+      .attention-critical .attention-item-label { color: #B91C1C; }
+      .attention-warning .attention-item-label { color: #B45309; }
+      .theme-dark .attention-critical .attention-item-label { color: #FCA5A5; }
+      .theme-dark .attention-warning .attention-item-label { color: #FCD34D; }
+      .attention-item-detail { font-size: 12.5px; color: var(--text-soft); line-height: 1.4; }
       .detail-layout { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0 28px; align-items: start; }
       .detail-main, .detail-side { min-width: 0; }
       .detail-side { border-left: 1px solid var(--border); padding-left: 24px; }
@@ -4641,6 +4819,15 @@ function GlobalStyles() {
         border-style: solid; border-width: 0 14px 14px 0; border-color: transparent rgba(113,63,18,0.16) transparent transparent;
         border-radius: 0 3px 0 10px;
       }
+
+      .notes-log-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; margin-bottom: 10px; padding: 4px 2px; }
+      .note-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+      .note-text { font-size: 13px; line-height: 1.4; white-space: pre-wrap; margin-bottom: 5px; }
+      .note-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-soft); }
+      .note-edit-btn { border: none; background: none; color: var(--text-soft); cursor: pointer; padding: 2px 4px; margin-left: auto; border-radius: 4px; display: inline-flex; }
+      .note-edit-btn:hover { background: var(--surface); color: var(--text); }
+      .note-item textarea { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; background: var(--bg); color: var(--text); font-family: inherit; resize: vertical; margin-bottom: 6px; }
+      .note-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
       .maint-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
       .maint-history-item { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; }
