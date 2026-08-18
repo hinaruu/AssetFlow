@@ -204,6 +204,7 @@ function getAssetIssues(asset) {
   if (!asset || asset.status === "Disposed") return issues;
   const now = new Date();
   const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const dayMs = 24 * 60 * 60 * 1000;
   const plainDate = (v) => {
     const d = new Date(v);
     return isNaN(d) ? v : d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
@@ -213,10 +214,13 @@ function getAssetIssues(asset) {
     const d = new Date(asset.warrantyExpiry);
     if (!isNaN(d) && d <= in30) {
       const expired = d < now;
+      const days = Math.abs(Math.round((d - now) / dayMs));
       issues.push({
         severity: expired ? "critical" : "warning",
         label: expired ? "Warranty Expired" : "Warranty Expiring Soon",
-        detail: `Warranty ${expired ? "expired" : "expires"} on ${plainDate(asset.warrantyExpiry)}.`,
+        detail: `Warranty ${expired ? "expired" : "expires"} on ${plainDate(asset.warrantyExpiry)}`,
+        shortDate: plainDate(asset.warrantyExpiry),
+        daysText: expired ? `${days} day${days === 1 ? "" : "s"} overdue` : `${days} day${days === 1 ? "" : "s"} left`,
       });
     }
   }
@@ -227,19 +231,22 @@ function getAssetIssues(asset) {
       const d = new Date(checkDate);
       if (!isNaN(d) && d <= in30) {
         const overdue = d < now;
+        const days = Math.abs(Math.round((d - now) / dayMs));
         issues.push({
           severity: overdue ? "critical" : "warning",
           label: overdue ? "Calibration Overdue" : "Calibration Due Soon",
-          detail: `Calibration ${overdue ? "was due" : "is due"} on ${plainDate(checkDate)}.`,
+          detail: `Calibration ${overdue ? "was due" : "is due"} on ${plainDate(checkDate)}`,
+          shortDate: plainDate(checkDate),
+          daysText: overdue ? `${days} day${days === 1 ? "" : "s"} overdue` : `${days} day${days === 1 ? "" : "s"} left`,
         });
       }
     }
   }
 
   if (asset.condition === "Poor") {
-    issues.push({ severity: "critical", label: "Poor Condition", detail: "This asset is recorded in poor condition and may need service or replacement." });
+    issues.push({ severity: "critical", label: "Poor Condition", detail: "Recorded in poor condition", shortDate: null, daysText: null });
   } else if (asset.condition === "Fair") {
-    issues.push({ severity: "warning", label: "Fair Condition", detail: "This asset is recorded in fair condition — worth keeping an eye on." });
+    issues.push({ severity: "warning", label: "Fair Condition", detail: "Recorded in fair condition", shortDate: null, daysText: null });
   }
 
   return issues;
@@ -3465,6 +3472,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
   const [editingNoteText, setEditingNoteText] = useState("");
   const [deleteNoteId, setDeleteNoteId] = useState(null);
   const issues = useMemo(() => getAssetIssues(asset), [asset]);
+  const healthSeverity = issues.some((i) => i.severity === "critical") ? "critical" : "warning";
   const notesLog = [...(asset.notesLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
   const canEditNote = (note) => isAdmin || note.authorId === currentUser.id;
   const submitNote = () => {
@@ -3531,25 +3539,34 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
         )}
         <span className="detail-hero-chip"><MapPin size={12} /> {loc?.name || "No location"}</span>
         {asset.assignedTo && <span className="detail-hero-chip"><User size={12} /> {asset.assignedTo}</span>}
+        <Badge color={issues.length ? (healthSeverity === "critical" ? "#EF4444" : "#F59E0B") : "#10B981"}>
+          {issues.length ? "Needs Attention" : "Good"}
+        </Badge>
       </div>
 
       {issues.length > 0 && (
-        <div className="attention-banner">
-          <div className="attention-banner-title">
-            <AlertTriangle size={15} />
-            {issues.length === 1 ? issues[0].label : `${issues.length} Issues Require Attention`}
-          </div>
-          <div className="attention-banner-list">
-            {issues.map((issue, i) => (
-              <div key={i} className={`attention-item attention-${issue.severity}`}>
-                <span className="attention-dot" />
-                <div>
-                  {issues.length > 1 && <div className="attention-item-label">{issue.label}</div>}
-                  <div className="attention-item-detail">{issue.detail}</div>
-                </div>
+        <div className={`health-alert health-alert-${healthSeverity}`}>
+          <AlertTriangle size={14} className="health-alert-icon" />
+          {issues.length === 1 ? (
+            <div className="health-alert-body">
+              <div className="health-alert-title">{issues[0].label.toUpperCase()}</div>
+              <div className="health-alert-detail">
+                {issues[0].detail}{issues[0].daysText ? ` · ${issues[0].daysText}` : ""}
               </div>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <div className="health-alert-body">
+              <div className="health-alert-title">NEEDS ATTENTION · {issues.length} ISSUES</div>
+              <div className="health-alert-detail">
+                {issues.map((iss, i) => (
+                  <span key={i}>
+                    {iss.label}{iss.shortDate ? ` · ${iss.shortDate}` : ""}
+                    {i < issues.length - 1 ? "   •   " : ""}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3587,11 +3604,20 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
           {asset.transferHistory && asset.transferHistory.length > 0 && (
             <div className="detail-group">
               <div className="detail-group-label"><Truck size={12} /> Transfer History</div>
-              {asset.transferHistory.map((t) => (
-                <div key={t.id} className="notif-item">
-                  {t.fromLocationName} → {t.toLocationName} — {t.reason} ({t.by}, {new Date(t.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })})
-                </div>
-              ))}
+              <div className="transfer-history-list">
+                {asset.transferHistory.map((t) => (
+                  <div key={t.id} className="transfer-entry">
+                    <span className="transfer-entry-dot" />
+                    <div className="transfer-entry-body">
+                      <div className="transfer-entry-route">{t.fromLocationName} → {t.toLocationName}</div>
+                      <div className="transfer-entry-meta">
+                        {t.by} · {new Date(t.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                      </div>
+                      {t.reason && <div className="transfer-entry-reason">"{t.reason}"</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -4816,20 +4842,29 @@ function GlobalStyles() {
       .detail-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
       .detail-hero-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
 
-      .attention-banner { background: var(--bg); border: 1px solid var(--border); border-left: 3px solid #EF4444; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
-      .attention-banner-title { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700; color: #B91C1C; text-transform: uppercase; letter-spacing: 0.02em; }
-      .theme-dark .attention-banner-title { color: #FCA5A5; }
-      .attention-banner-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-      .attention-item { display: flex; align-items: flex-start; gap: 8px; }
-      .attention-dot { width: 7px; height: 7px; border-radius: 999px; margin-top: 5px; flex-shrink: 0; }
-      .attention-critical .attention-dot { background: #EF4444; }
-      .attention-warning .attention-dot { background: #F59E0B; }
-      .attention-item-label { font-size: 12.5px; font-weight: 700; }
-      .attention-critical .attention-item-label { color: #B91C1C; }
-      .attention-warning .attention-item-label { color: #B45309; }
-      .theme-dark .attention-critical .attention-item-label { color: #FCA5A5; }
-      .theme-dark .attention-warning .attention-item-label { color: #FCD34D; }
-      .attention-item-detail { font-size: 12.5px; color: var(--text-soft); line-height: 1.4; }
+      /* Compact single-strip "Needs Attention" alert — deliberately NOT a
+         tall boxed list, so it stays out of the way of the actual asset
+         info below it. */
+      .health-alert { display: flex; align-items: flex-start; gap: 8px; border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; background: var(--bg); border: 1px solid var(--border); }
+      .health-alert-critical { border-left: 3px solid #EF4444; }
+      .health-alert-warning { border-left: 3px solid #F59E0B; }
+      .health-alert-icon { flex-shrink: 0; margin-top: 2px; }
+      .health-alert-critical .health-alert-icon { color: #EF4444; }
+      .health-alert-warning .health-alert-icon { color: #F59E0B; }
+      .health-alert-body { min-width: 0; }
+      .health-alert-title { font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+      .health-alert-critical .health-alert-title { color: #B91C1C; }
+      .health-alert-warning .health-alert-title { color: #B45309; }
+      .theme-dark .health-alert-critical .health-alert-title { color: #FCA5A5; }
+      .theme-dark .health-alert-warning .health-alert-title { color: #FCD34D; }
+      .health-alert-detail { font-size: 12.5px; color: var(--text-soft); line-height: 1.4; margin-top: 1px; }
+
+      .transfer-history-list { display: flex; flex-direction: column; gap: 9px; max-height: 130px; overflow-y: auto; padding-right: 2px; }
+      .transfer-entry { display: flex; align-items: flex-start; gap: 8px; }
+      .transfer-entry-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--accent); margin-top: 5px; flex-shrink: 0; }
+      .transfer-entry-route { font-size: 12.5px; font-weight: 700; }
+      .transfer-entry-meta { font-size: 11px; color: var(--text-soft); margin-top: 1px; }
+      .transfer-entry-reason { font-size: 12px; color: var(--text-soft); font-style: italic; margin-top: 2px; }
       .detail-layout { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0 28px; align-items: start; }
       .detail-main, .detail-side { min-width: 0; }
       .detail-side { border-left: 1px solid var(--border); padding-left: 24px; }
