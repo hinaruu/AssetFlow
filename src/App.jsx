@@ -2,9 +2,12 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import {
   LayoutDashboard, Package, Wrench, MapPin, Tags, Users, User, LogOut,
   Menu, Sun, Moon, Plus, Pencil, Trash2, Download, Upload, X, Search,
-  KeyRound, ShieldCheck, AlertTriangle, Info, Clock,
+  KeyRound, ShieldCheck, ShieldAlert, ShieldX, AlertTriangle, Info, Clock,
   Bell, Copy, Truck, CheckSquare, Archive, ExternalLink,
   ChevronUp, ChevronDown, ChevronsUpDown, MessageCircle, Check,
+  Laptop, Cpu, Monitor, Smartphone, Tablet, Printer, Router, Keyboard,
+  Mouse, Headphones, Server, Gauge, History, ClipboardCheck, HardDrive,
+  DollarSign,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
 import * as XLSX from "xlsx";
@@ -221,6 +224,7 @@ function getAssetIssues(asset) {
         detail: `Warranty ${expired ? "expired" : "expires"} on ${plainDate(asset.warrantyExpiry)}`,
         shortDate: plainDate(asset.warrantyExpiry),
         daysText: expired ? `${days} day${days === 1 ? "" : "s"} overdue` : `${days} day${days === 1 ? "" : "s"} left`,
+        icon: expired ? ShieldX : ShieldAlert,
       });
     }
   }
@@ -238,15 +242,16 @@ function getAssetIssues(asset) {
           detail: `Calibration ${overdue ? "was due" : "is due"} on ${plainDate(checkDate)}`,
           shortDate: plainDate(checkDate),
           daysText: overdue ? `${days} day${days === 1 ? "" : "s"} overdue` : `${days} day${days === 1 ? "" : "s"} left`,
+          icon: overdue ? Wrench : Gauge,
         });
       }
     }
   }
 
   if (asset.condition === "Poor") {
-    issues.push({ severity: "critical", label: "Poor Condition", detail: "Recorded in poor condition", shortDate: null, daysText: null });
+    issues.push({ severity: "critical", label: "Poor Condition", detail: "Recorded in poor condition", shortDate: null, daysText: null, icon: AlertTriangle });
   } else if (asset.condition === "Fair") {
-    issues.push({ severity: "warning", label: "Fair Condition", detail: "Recorded in fair condition", shortDate: null, daysText: null });
+    issues.push({ severity: "warning", label: "Fair Condition", detail: "Recorded in fair condition", shortDate: null, daysText: null, icon: AlertTriangle });
   }
 
   return issues;
@@ -332,6 +337,31 @@ const CAT_PALETTE = ["#6366F1", "#10B981", "#F59E0B", "#EC4899", "#06B6D4", "#8B
 function categoryColor(categories, categoryId) {
   const idx = categories.findIndex((c) => c.id === categoryId);
   return idx >= 0 ? CAT_PALETTE[idx % CAT_PALETTE.length] : "#9CA3AF";
+}
+
+// Maps a category's own name to a specific hardware icon by keyword —
+// e.g. "Laptops" and "Company Laptops" both match the laptop icon, not
+// just an exact "Laptop" string. Falls back to a generic package icon
+// for anything that doesn't match a recognized device type (custom
+// categories, consumables, etc.), matched in order from most to least
+// specific so "Network Switch" doesn't accidentally match something
+// looser first.
+const CATEGORY_ICON_RULES = [
+  [/laptop|notebook/i, Laptop],
+  [/desktop|tower|workstation/i, Cpu],
+  [/monitor|display|screen/i, Monitor],
+  [/phone|mobile/i, Smartphone],
+  [/tablet|ipad/i, Tablet],
+  [/printer|scanner/i, Printer],
+  [/network|router|switch|access point|wifi/i, Router],
+  [/keyboard/i, Keyboard],
+  [/mouse/i, Mouse],
+  [/headset|headphone|audio/i, Headphones],
+  [/server|rack/i, Server],
+];
+function categoryIcon(categoryName) {
+  const match = CATEGORY_ICON_RULES.find(([re]) => re.test(categoryName || ""));
+  return match ? match[1] : Package;
 }
 
 // Known vendor warranty/spec lookup pages, matched against the asset's Brand
@@ -628,7 +658,7 @@ function NoProfileScreen({ email, onSignOut }) {
   return (
     <div className="login-wrap">
       <div className="login-card" style={{ textAlign: "center" }}>
-        <div className="confirm-icon"><AlertTriangle size={20} /></div>
+        <div className="confirm-icon"><Info size={20} /></div>
         <h3 style={{ marginBottom: 8 }}>Account not set up yet</h3>
         <p className="login-sub">
           You're signed in as <strong>{email}</strong>, but there's no matching profile for
@@ -966,11 +996,11 @@ function Sidebar({ open, onToggle, view, setView, isAdmin, isRegionalAdmin, pend
       { id: "categories", label: "Categories", icon: Tags },
       { id: "locations", label: "Locations", icon: MapPin },
       { id: "users", label: "User Accounts", icon: Users },
-      { id: "backup", label: "Backup & Restore", icon: Download },
+      { id: "backup", label: "Backup & Restore", icon: HardDrive },
     ] : []),
-    { id: "activity", label: "Activity Log", icon: ShieldCheck },
+    { id: "activity", label: "Activity Log", icon: History },
     ...(isAdmin || isRegionalAdmin ? [
-      { id: "approvals", label: "Approvals", icon: AlertTriangle, badge: pendingCount },
+      { id: "approvals", label: "Approvals", icon: ClipboardCheck, badge: pendingCount },
     ] : []),
   ];
   return (
@@ -1422,17 +1452,17 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
           <div className="panel-head panel-head-sub"><h3>Calibration Overview</h3></div>
           <div className="warranty-stats">
             <div className="warranty-stat">
-              <div className="warranty-stat-icon" style={{ background: "#D1FAE522", color: "#10B981" }}><ShieldCheck size={16} /></div>
+              <div className="warranty-stat-icon" style={{ background: "#D1FAE522", color: "#10B981" }}><Gauge size={16} /></div>
               <div className="warranty-stat-value">{calibrationStats.thisMonth}</div>
               <div className="warranty-stat-label">This Month<br />Due</div>
             </div>
             <div className="warranty-stat">
-              <div className="warranty-stat-icon" style={{ background: "#FEF3C722", color: "#F59E0B" }}><Bell size={16} /></div>
+              <div className="warranty-stat-icon" style={{ background: "#FEF3C722", color: "#F59E0B" }}><Gauge size={16} /></div>
               <div className="warranty-stat-value">{calibrationStats.next30}</div>
               <div className="warranty-stat-label">Next 30 Days<br />Due</div>
             </div>
             <div className="warranty-stat">
-              <div className="warranty-stat-icon" style={{ background: "#FEE2E222", color: "#EF4444" }}><AlertTriangle size={16} /></div>
+              <div className="warranty-stat-icon" style={{ background: "#FEE2E222", color: "#EF4444" }}><Wrench size={16} /></div>
               <div className="warranty-stat-value">{calibrationStats.overdue}</div>
               <div className="warranty-stat-label">Overdue<br />Assets</div>
             </div>
@@ -2628,7 +2658,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
                       </td>
                     )}
                     <td data-label="Category">
-                      {cat && <span className="cat-dot" style={{ background: categoryColor(data.categories, a.categoryId) }} />}
+                      {cat && (() => { const CatIcon = categoryIcon(cat.name); return <CatIcon size={13} className="cat-icon" style={{ color: categoryColor(data.categories, a.categoryId) }} />; })()}
                       {cat?.name || "—"}
                     </td>
                     <td data-label="Asset Tag">
@@ -3275,7 +3305,7 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
         )}
 
         {step === 1 && (
-        <FormSection icon={Tags} title="Device Details">
+        <FormSection icon={Cpu} title="Device Details">
           <Field label="Brand">
             <SearchableSelect value={form.brand} onChange={(v) => set("brand", v)} options={brandOptions} placeholder="Search or type a brand" />
           </Field>
@@ -3531,12 +3561,12 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
     <Modal title={`Asset Details — ${asset.tag}`} onClose={onClose} width={1040}>
       <div className="detail-hero">
         <Badge color={STATUS_COLORS[asset.status] || "#6B7280"}>{asset.status}</Badge>
-        {cat && (
+        {cat && (() => { const CatIcon = categoryIcon(cat.name); return (
           <span className="detail-hero-chip">
-            <span className="cat-dot" style={{ background: categoryColor(categories, asset.categoryId) }} />
+            <CatIcon size={12} style={{ color: categoryColor(categories, asset.categoryId) }} />
             {cat.name}
           </span>
-        )}
+        ); })()}
         <span className="detail-hero-chip"><MapPin size={12} /> {loc?.name || "No location"}</span>
         {asset.assignedTo && <span className="detail-hero-chip"><User size={12} /> {asset.assignedTo}</span>}
         <Badge color={issues.length ? (healthSeverity === "critical" ? "#EF4444" : "#F59E0B") : "#10B981"}>
@@ -3544,9 +3574,16 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
         </Badge>
       </div>
 
-      {issues.length > 0 && (
+      {issues.length > 0 && (() => {
+        // Single-issue mode shows the specific icon for that issue (a
+        // shield for warranty, a gauge/wrench for calibration); with
+        // multiple issues, one leading triangle reads as "attention
+        // needed" without repeating a different icon per line, which
+        // would clutter the compact summary.
+        const LeadIcon = issues.length === 1 ? (issues[0].icon || AlertTriangle) : AlertTriangle;
+        return (
         <div className={`health-alert health-alert-${healthSeverity}`}>
-          <AlertTriangle size={14} className="health-alert-icon" />
+          <LeadIcon size={14} className="health-alert-icon" />
           {issues.length === 1 ? (
             <div className="health-alert-body">
               <div className="health-alert-title">{issues[0].label.toUpperCase()}</div>
@@ -3568,7 +3605,8 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       <div className="detail-layout">
         <div className="detail-main">
@@ -3579,7 +3617,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
             {row("Asset Type", asset.assetType)}
           </>)}
 
-          {detailGroup(Tags, "Device Details", <>
+          {detailGroup(Cpu, "Device Details", <>
             {row("Brand / Model", [asset.brand, asset.model].filter(Boolean).join(" / "))}
             {row("Year Model", asset.yearModel)}
             {row("Serial Number", asset.serial)}
@@ -3595,7 +3633,7 @@ function AssetDetailModal({ asset, categories, locations, isAdmin, canDeleteDire
             {row("Added By", asset.createdByName)}
           </>)}
 
-          {detailGroup(Info, "Purchase & Warranty", <>
+          {detailGroup(DollarSign, "Purchase & Warranty", <>
             {row("Purchase Date", asset.purchaseDate)}
             {row("Purchase Cost", asset.purchaseCost ? `$${asset.purchaseCost}` : "")}
             {asset.assetType === "IT" && row("Warranty Expiry", asset.warrantyExpiry)}
@@ -5022,7 +5060,7 @@ function GlobalStyles() {
       tbody td { padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
       tbody tr:last-child td { border-bottom: none; }
       .mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
-      .cat-dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 7px; vertical-align: middle; }
+      .cat-icon { margin-right: 6px; vertical-align: -2px; flex-shrink: 0; }
       tbody tr:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
       .asset-row { cursor: pointer; }
       .asset-row .checkbox-cell { cursor: default; }
