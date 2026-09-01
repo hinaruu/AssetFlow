@@ -532,9 +532,9 @@ function IconBtn({ icon: Icon, onClick, title, danger }) {
   );
 }
 
-function Modal({ title, onClose, children, width = 480 }) {
+function Modal({ title, onClose, children, width = 480, closeOnBackdrop = true }) {
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={closeOnBackdrop ? onClose : undefined}>
       <div className="modal" style={{ maxWidth: width }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>{title}</h3>
@@ -1693,7 +1693,30 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [userFilter, setUserFilter] = useState("all");
   const [presetFilter, setPresetFilter] = useState("all"); // one-tap shortcuts: under repair / needs attention / pending approval
-  const [editing, setEditing] = useState(null);
+  // Add/Edit Asset draft persistence — protects against the browser
+  // itself discarding this tab in the background (common on mobile, and
+  // under memory pressure on desktop), which silently reloads the page
+  // from scratch and would otherwise wipe out an in-progress form even
+  // though nothing in the app's own code caused it. Restores
+  // automatically if the modal was still open when that happened; the
+  // draft is cleared the moment `editing` goes back to null, which
+  // already happens on Cancel, X, and a successful save — no need to
+  // special-case any of those individually.
+  const ASSET_DRAFT_KEY = "asset-draft-v1";
+  const [editing, setEditing] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(ASSET_DRAFT_KEY);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    try {
+      if (editing) sessionStorage.setItem(ASSET_DRAFT_KEY, JSON.stringify(editing));
+      else sessionStorage.removeItem(ASSET_DRAFT_KEY);
+    } catch {}
+  }, [editing]);
   const [viewing, setViewing] = useState(null);
 
   // A comment notification was clicked elsewhere in the app — jump straight
@@ -3286,7 +3309,12 @@ function AssetModal({ asset, categories, locations, isAdmin, scopedLocationId, e
   };
 
   return (
-    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={820}>
+    // closeOnBackdrop={false}: an accidental click on the dark overlay
+    // (easy to trigger while reaching for something else on screen, e.g.
+    // a sidebar item) used to silently discard the whole form. Per the
+    // explicit requirement, this modal now only closes via Cancel, X, or
+    // a successful save — never an incidental outside click.
+    <Modal title={asset.id ? "Edit Asset" : "New Asset"} onClose={onClose} width={820} closeOnBackdrop={false}>
       <form onSubmit={submit}>
         <div className="wizard-steps">
           {WIZARD_STEPS.map((s, i) => {
