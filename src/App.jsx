@@ -955,7 +955,18 @@ export default function App() {
             {view === "dashboard" && (
               <Dashboard data={data} scopedLocationId={scopedLocationId} currentUser={currentUser} setView={setView} />
             )}
-            {view === "assets" && (
+            {/* Rendered unconditionally (visibility toggled via CSS, not
+                mount/unmount) — unlike the other views, this one owns the
+                Add/Edit Asset modal's state locally. Switching it in and
+                out with the `view === "assets" &&` pattern used elsewhere
+                was the actual bug: React destroys a component's state
+                when it stops being rendered, so navigating to another tab
+                and back created a brand-new AssetsView from scratch,
+                silently dropping whatever was open in the Add Asset
+                modal. Keeping it mounted (just hidden) means that state
+                now only ever goes away when the user explicitly closes
+                it — Cancel, X, or a successful save, same as before. */}
+            <div style={{ display: view === "assets" ? "block" : "none" }}>
               <AssetsView
                 data={data}
                 persist={persist}
@@ -969,7 +980,7 @@ export default function App() {
                 onFocusHandled={() => setFocusAssetId(null)}
                 applyLocalOnly={setData}
               />
-            )}
+            </div>
             {view === "maintenance" && (
               <MaintenanceView data={data} persist={persist} showToast={showToast} scopedLocationId={scopedLocationId} currentUser={currentUser} />
             )}
