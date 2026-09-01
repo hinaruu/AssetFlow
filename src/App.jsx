@@ -172,8 +172,23 @@ function maybeRestoreStatus(assets, maintenance, assetId) {
 // Builds the list of "upcoming attention needed" items shown in the
 // notification bell — warranty expiring (IT) and calibration due (Non-IT),
 // within the next 30 days or already overdue.
-function computeAlerts(assets, scopedLocationId) {
-  let list = scopedLocationId ? assets.filter((a) => a.locationId === scopedLocationId) : assets;
+// A user's full set of locations: their Primary Location (users.locationId,
+// unchanged and still what every "default" behavior uses — new asset
+// creation, profile summaries, etc.) plus any Additional Locations an
+// Overall Admin has assigned via user_locations. Only the handful of
+// places that decide what a user can SEE and interact with across the
+// app need this; everything else keeps using the plain locationId.
+function userLocationIds(user, data) {
+  if (!user?.locationId) return [];
+  const extra = (data.userLocations || []).filter((ul) => ul.userId === user.id).map((ul) => ul.locationId);
+  return Array.from(new Set([user.locationId, ...extra]));
+}
+
+// `scope` is null (Admin — sees everything), a single location id (the
+// common case), or an array of location ids (a multi-location user).
+function computeAlerts(assets, scope) {
+  const scopeIds = scope == null ? null : Array.isArray(scope) ? scope : [scope];
+  let list = scopeIds ? assets.filter((a) => scopeIds.includes(a.locationId)) : assets;
   list = list.filter((a) => a.status !== "Disposed");
   const now = new Date();
   const in30 = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -965,7 +980,7 @@ export default function App() {
               <LocationsView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
             )}
             {view === "users" && isAdmin && (
-              <UsersView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
+              <UsersView data={data} persist={persist} showToast={showToast} currentUser={currentUser} isAdmin={isAdmin} />
             )}
             {view === "backup" && isAdmin && (
               <BackupView data={data} persist={persist} showToast={showToast} currentUser={currentUser} />
@@ -1047,6 +1062,11 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   // original targeted-comment notifications below, unchanged.
   const isRegionalAdmin = currentUser.role === "Regional Admin";
   const broadNotifScope = isAdmin || isRegionalAdmin;
+  // Primary Location still drives the single-location display below and
+  // any "default" behavior; scopedLocationIds (Primary + any Additional
+  // Locations an Overall Admin assigned) is what actually decides what
+  // this user can see across the notification/alert surfaces further down.
+  const scopedLocationIds = scopedLocationId ? userLocationIds(currentUser, data) : null;
   const locName = scopedLocationId
     ? locations.find((l) => l.id === scopedLocationId)?.name
     : "All Locations (HQ)";
@@ -1076,7 +1096,7 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
     if (onOpenAsset) onOpenAsset(alert.assetId);
   };
 
-  const allAlerts = useMemo(() => computeAlerts(data.assets, scopedLocationId), [data.assets, scopedLocationId]);
+  const allAlerts = useMemo(() => computeAlerts(data.assets, scopedLocationIds), [data.assets, scopedLocationIds]);
   const alerts = useMemo(() => allAlerts.filter((a) => !readAlertIds.includes(a.id)), [allAlerts, readAlertIds]);
   const recentActivity = useMemo(() => (data.auditLog || []).slice(0, 6), [data.auditLog]);
   const myComments = useMemo(
@@ -1084,11 +1104,11 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
       if (!(c.targetUserIds || []).includes(currentUser.id) || (c.readBy || []).includes(currentUser.id)) return false;
       // Live access check: even if targetUserIds was set at comment time,
       // an asset that has since been transferred away from this user's
-      // location should no longer surface a notification for it.
+      // location(s) should no longer surface a notification for it.
       const asset = data.assets.find((a) => a.id === c.assetId);
-      return !!asset && asset.locationId === scopedLocationId;
+      return !!asset && !!scopedLocationIds && scopedLocationIds.includes(asset.locationId);
     }).sort((a, b) => new Date(b.at) - new Date(a.at))),
-    [data.comments, data.assets, currentUser.id, scopedLocationId, broadNotifScope]
+    [data.comments, data.assets, currentUser.id, scopedLocationIds, broadNotifScope]
   );
 
   // Overall Admin / Regional Admin: any significant update on any asset in
@@ -1101,8 +1121,8 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
   );
   const activityScopeAssetIds = useMemo(() => {
     if (!broadNotifScope || isAdmin) return null; // null = every asset (Overall Admin)
-    return new Set(data.assets.filter((a) => a.locationId === scopedLocationId).map((a) => a.id));
-  }, [data.assets, broadNotifScope, isAdmin, scopedLocationId]);
+    return new Set(data.assets.filter((a) => scopedLocationIds && scopedLocationIds.includes(a.locationId)).map((a) => a.id));
+  }, [data.assets, broadNotifScope, isAdmin, scopedLocationIds]);
   const unreadActivityMap = useMemo(() => {
     if (!broadNotifScope) return new Map();
     return computeUnreadAssetActivity(
@@ -1258,10 +1278,14 @@ function TopBar({ theme, toggleTheme, currentUser, onLogout, locations, scopedLo
 --------------------------------------------------------- */
 function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   const isAdmin = currentUser?.role === "Admin";
+  // Primary Location + any Additional Locations an Overall Admin has
+  // assigned this user — everything the dashboard displays/counts should
+  // reflect everywhere they actually work, not just their primary.
+  const scopedLocationIds = scopedLocationId ? userLocationIds(currentUser, data) : null;
   // Disposed assets are excluded from every dashboard figure below —
   // they're historical records, not part of the active fleet being measured.
-  const assets = (scopedLocationId
-    ? data.assets.filter((a) => a.locationId === scopedLocationId)
+  const assets = (scopedLocationIds
+    ? data.assets.filter((a) => scopedLocationIds.includes(a.locationId))
     : data.assets
   ).filter((a) => a.status !== "Disposed");
 
@@ -1393,11 +1417,11 @@ function Dashboard({ data, scopedLocationId, currentUser, setView }) {
   // user/backup admin actions) only ever shows for Admins, who see
   // everything unfiltered.
   const recentActivity = useMemo(() => {
-    const list = scopedLocationId
-      ? (data.auditLog || []).filter((l) => l.locationId === scopedLocationId)
+    const list = scopedLocationIds
+      ? (data.auditLog || []).filter((l) => scopedLocationIds.includes(l.locationId))
       : (data.auditLog || []);
     return list.slice(0, 5);
-  }, [data.auditLog, scopedLocationId]);
+  }, [data.auditLog, scopedLocationIds]);
 
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -1648,6 +1672,11 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   // Regional Staff can export their location's assets but never import —
   // only Admin and Regional Admin are trusted to write bulk data in.
   const canImport = isAdmin || isRegionalAdmin;
+  // Primary Location + any Additional Locations an Overall Admin has
+  // assigned this user — this is what decides what they can actually see
+  // and act on in the table below; scopedLocationId (Primary only) is
+  // still what "New Asset"/duplicate default and lock to, further down.
+  const scopedLocationIds = scopedLocationId ? userLocationIds(currentUser, data) : null;
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -1664,9 +1693,9 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
     // Only open the asset if the current user still has access to it —
     // an asset transferred to a different location shouldn't be openable
     // via a stale notification link either.
-    if (a && (isAdmin || a.locationId === scopedLocationId)) setViewing(a);
+    if (a && (isAdmin || (scopedLocationIds && scopedLocationIds.includes(a.locationId)))) setViewing(a);
     if (onFocusHandled) onFocusHandled();
-  }, [focusAssetId, data.assets, onFocusHandled, isAdmin, scopedLocationId]);
+  }, [focusAssetId, data.assets, onFocusHandled, isAdmin, scopedLocationIds]);
 
   // NOTIFICATION SCOPE — Overall Admin and Regional Admin see a badge for
   // ANY significant update on an asset in their scope (comments, notes,
@@ -1696,8 +1725,8 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   // else location scoping happens in this app.
   const regionalActivityAssetIds = useMemo(() => {
     if (isAdmin || !broadActivityScope) return null;
-    return new Set(data.assets.filter((a) => a.locationId === scopedLocationId).map((a) => a.id));
-  }, [data.assets, isAdmin, broadActivityScope, scopedLocationId]);
+    return new Set(data.assets.filter((a) => scopedLocationIds && scopedLocationIds.includes(a.locationId)).map((a) => a.id));
+  }, [data.assets, isAdmin, broadActivityScope, scopedLocationIds]);
   const unreadActivityAssetIds = useMemo(() => {
     if (!broadActivityScope) return unreadCommentAssetIds;
     const inScope = (assetId) => isAdmin || (regionalActivityAssetIds && regionalActivityAssetIds.has(assetId));
@@ -1710,7 +1739,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   // can flag it with a small icon (see the legend above the table).
   const assetAlertMap = useMemo(() => {
     const map = new Map();
-    computeAlerts(data.assets, scopedLocationId).forEach((al) => {
+    computeAlerts(data.assets, scopedLocationIds).forEach((al) => {
       const kind = al.id.endsWith("-w") ? "warranty" : "calibration";
       const existing = map.get(al.assetId);
       if (!existing || (al.urgent && !existing.urgent)) {
@@ -1718,7 +1747,7 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
       }
     });
     return map;
-  }, [data.assets, scopedLocationId]);
+  }, [data.assets, scopedLocationIds]);
 
   // Opening an asset's detail view (from the table, or from a notification)
   // also clears its unread-comment flag for the current user.
@@ -1772,11 +1801,11 @@ function AssetsView({ data, persist, isAdmin, isRegionalAdmin, canDeleteDirectly
   const fileInputRef = React.useRef(null);
   const [pendingImport, setPendingImport] = useState(null); // staged parsed rows awaiting the replace-confirmation below
 
-  // The base pool of assets this user can see at all — a Regional Staff
-  // account only ever sees their own location's assets.
+  // The base pool of assets this user can see at all — their Primary
+  // Location plus any Additional Locations an Overall Admin has assigned.
   const scopedAssetsBase = useMemo(
-    () => (scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets),
-    [data.assets, scopedLocationId]
+    () => (scopedLocationIds ? data.assets.filter((a) => scopedLocationIds.includes(a.locationId)) : data.assets),
+    [data.assets, scopedLocationIds]
   );
 
   // Regional Staff should only see assigned-user names from their own
@@ -3819,7 +3848,10 @@ function MaintenanceView({ data, persist, showToast, scopedLocationId, currentUs
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
-  const assetsInScope = scopedLocationId ? data.assets.filter((a) => a.locationId === scopedLocationId) : data.assets;
+  // Primary Location + any Additional Locations an Overall Admin has
+  // assigned this user.
+  const scopedLocationIds = scopedLocationId ? userLocationIds(currentUser, data) : null;
+  const assetsInScope = scopedLocationIds ? data.assets.filter((a) => scopedLocationIds.includes(a.locationId)) : data.assets;
   const assetIds = new Set(assetsInScope.map((a) => a.id));
   const logs = data.maintenance.filter((m) => assetIds.has(m.assetId));
 
@@ -4216,35 +4248,53 @@ function LocationsView({ data, persist, showToast, currentUser }) {
    Users View
 --------------------------------------------------------- */
 function emptyUser(locations) {
-  return { id: null, name: "", username: "", email: "", position: "", role: "Regional Staff", locationId: locations[0]?.id || "" };
+  return { id: null, name: "", username: "", email: "", position: "", role: "Regional Staff", locationId: locations[0]?.id || "", additionalLocationIds: [] };
 }
 
-function UsersView({ data, persist, showToast, currentUser }) {
+function UsersView({ data, persist, showToast, currentUser, isAdmin }) {
   const [editing, setEditing] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [addingLocation, setAddingLocation] = useState(false);
 
   const save = async (form) => {
-    if (form.id) {
-      const next = withLog({ ...data, users: data.users.map((u) => (u.id === form.id ? { ...u, name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId } : u)) }, currentUser, `Edited user "${form.name}"`);
-      persist(next);
-    } else {
-      // This only creates the profile row (name/role/location) — it does
-      // NOT create a login. Creating real Auth accounts requires the
-      // service_role key, which must never reach the browser, so that
-      // step happens in the Supabase dashboard (Authentication → Users →
-      // Invite) using the same email, then the resulting account is
-      // linked to this profile — see the hint shown below the form and
-      // CRITICAL-SECURITY-STEPS.md (Phase 3/6).
-      const newUser = { id: uid("usr"), name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId, authUserId: null };
-      persist(withLog({ ...data, users: [...data.users, newUser] }, currentUser, `Added user "${newUser.name}" (${newUser.role})`));
+    const userId = form.id || uid("usr");
+    const isNew = !form.id;
+    const baseFields = { name: form.name, username: form.username, email: form.email, position: form.position, role: form.role, locationId: form.role === "Admin" ? null : form.locationId };
+
+    const nextUsers = isNew
+      ? [...data.users, { id: userId, ...baseFields, authUserId: null }]
+      : data.users.map((u) => (u.id === userId ? { ...u, ...baseFields } : u));
+
+    // Multi-location assignment is Overall-Admin-only, mirroring the real
+    // enforcement in the database (see add-multi-location-users.sql) — the
+    // "Additional Locations" control only ever renders for isAdmin below,
+    // so a non-Admin's form never carries this field to begin with.
+    let nextUserLocations = (data.userLocations || []).filter((ul) => ul.userId !== userId);
+    if (isAdmin && form.role !== "Admin") {
+      const additional = Array.from(new Set((form.additionalLocationIds || []).filter((id) => id && id !== form.locationId)));
+      nextUserLocations = [
+        ...nextUserLocations,
+        ...additional.map((locationId) => ({ id: `${userId}::${locationId}`, userId, locationId })),
+      ];
     }
+
+    const next = withLog(
+      { ...data, users: nextUsers, userLocations: nextUserLocations },
+      currentUser,
+      isNew ? `Added user "${form.name}" (${form.role})` : `Edited user "${form.name}"`
+    );
+    persist(next);
     setEditing(null);
-    showToast(form.id ? "User saved." : "Profile created — invite them in Supabase to finish setup.");
+    showToast(isNew ? "Profile created — invite them in Supabase to finish setup." : "User saved.");
   };
 
   const remove = async (id) => {
     const u = data.users.find((x) => x.id === id);
-    persist(withLog({ ...data, users: data.users.filter((u) => u.id !== id) }, currentUser, `Removed user "${u?.name}"`));
+    persist(withLog({
+      ...data,
+      users: data.users.filter((u) => u.id !== id),
+      userLocations: (data.userLocations || []).filter((ul) => ul.userId !== id),
+    }, currentUser, `Removed user "${u?.name}"`));
     setConfirmDelete(null);
     showToast("User removed.");
   };
@@ -4274,16 +4324,27 @@ function UsersView({ data, persist, showToast, currentUser }) {
             <tbody>
               {data.users.map((u) => {
                 const loc = data.locations.find((l) => l.id === u.locationId);
+                const additional = (data.userLocations || []).filter((ul) => ul.userId === u.id).map((ul) => data.locations.find((l) => l.id === ul.locationId)?.name).filter(Boolean);
                 return (
                   <tr key={u.id}>
                     <td data-label="Name">{u.name}</td>
                     <td data-label="Position">{u.position || "—"}</td>
                     <td className="mono" data-label="Username">{u.username}</td>
                     <td data-label="Role"><Badge color={u.role === "Admin" ? "#6366F1" : u.role === "Regional Admin" ? "#F59E0B" : "#10B981"}>{u.role}</Badge></td>
-                    <td data-label="Location">{loc?.name || "— (Global)"}</td>
+                    <td data-label="Location">
+                      {loc?.name || "— (Global)"}
+                      {additional.length > 0 && <span className="user-extra-locations"> +{additional.length} ({additional.join(", ")})</span>}
+                    </td>
                     <td className="actions-cell">
                       <div className="row-actions">
-                        <IconBtn icon={Pencil} title="Edit" onClick={() => setEditing({ ...u })} />
+                        <IconBtn
+                          icon={Pencil}
+                          title="Edit"
+                          onClick={() => setEditing({
+                            ...u,
+                            additionalLocationIds: (data.userLocations || []).filter((ul) => ul.userId === u.id).map((ul) => ul.locationId),
+                          })}
+                        />
                         <IconBtn icon={KeyRound} title={u.authUserId ? "Send Password Reset Email" : "Not linked to a login yet"} onClick={() => sendPasswordReset(u)} />
                         <IconBtn icon={Trash2} title="Delete" danger onClick={() => setConfirmDelete(u.id)} />
                       </div>
@@ -4311,11 +4372,60 @@ function UsersView({ data, persist, showToast, currentUser }) {
               </select>
             </Field>
             {editing.role !== "Admin" && (
-              <Field label="Location">
-                <select value={editing.locationId} onChange={(e) => setEditing({ ...editing, locationId: e.target.value })}>
+              <Field label="Primary Location">
+                <select value={editing.locationId} onChange={(e) => setEditing({ ...editing, locationId: e.target.value, additionalLocationIds: (editing.additionalLocationIds || []).filter((id) => id !== e.target.value) })}>
                   {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
                 </select>
               </Field>
+            )}
+            {/* Multi-location assignment is Overall-Admin-only — mirrors the
+                real enforcement in the database (add-multi-location-users.sql),
+                this is just the UI half of it. Anyone else editing a user
+                only ever sees the single Location field above. */}
+            {isAdmin && editing.role !== "Admin" && (
+              <div className="form-full">
+                <Field label="Additional Locations">
+                  <div className="location-pill-row">
+                    {(editing.additionalLocationIds || []).map((locId) => {
+                      const loc = data.locations.find((l) => l.id === locId);
+                      if (!loc) return null;
+                      return (
+                        <span key={locId} className="location-pill">
+                          {loc.name}
+                          <button
+                            type="button"
+                            onClick={() => setEditing({ ...editing, additionalLocationIds: editing.additionalLocationIds.filter((id) => id !== locId) })}
+                            title="Remove"
+                          >
+                            <X size={11} />
+                          </button>
+                        </span>
+                      );
+                    })}
+                    {addingLocation ? (
+                      <div className="location-pill-picker">
+                        <SearchableSelect
+                          value=""
+                          onChange={(id) => {
+                            if (id) setEditing({ ...editing, additionalLocationIds: Array.from(new Set([...(editing.additionalLocationIds || []), id])) });
+                            setAddingLocation(false);
+                          }}
+                          options={data.locations
+                            .filter((l) => l.id !== editing.locationId && !(editing.additionalLocationIds || []).includes(l.id))
+                            .map((l) => ({ value: l.id, label: l.name }))}
+                          placeholder="Search locations…"
+                          allowCustom={false}
+                        />
+                      </div>
+                    ) : (
+                      <button type="button" className="location-pill-add" onClick={() => setAddingLocation(true)}>
+                        <Plus size={12} /> Add Location
+                      </button>
+                    )}
+                  </div>
+                  <span className="field-hint">Gives this person access to assets in these locations too, on top of their Primary Location above.</span>
+                </Field>
+              </div>
             )}
             {editing.role === "Regional Admin" && (
               <div className="form-full hint-box">
@@ -4331,7 +4441,7 @@ function UsersView({ data, persist, showToast, currentUser }) {
               </div>
             )}
             <div className="form-full modal-actions">
-              <button type="button" className="btn ghost" onClick={() => setEditing(null)}>Cancel</button>
+              <button type="button" className="btn ghost" onClick={() => { setEditing(null); setAddingLocation(false); }}>Cancel</button>
               <button
                 type="button"
                 className="btn primary"
@@ -4345,6 +4455,7 @@ function UsersView({ data, persist, showToast, currentUser }) {
                     return;
                   }
                   save(editing);
+                  setAddingLocation(false);
                 }}
               >
                 Save User
@@ -4402,6 +4513,10 @@ function buildBackupWorkbook(data) {
     authUserId: u.authUserId || "", role: u.role, locationId: u.locationId || "",
   })));
 
+  addSheet("UserLocations", (data.userLocations || []).map((ul) => ({
+    id: ul.id, userId: ul.userId, locationId: ul.locationId,
+  })));
+
   addSheet("Comments", (data.comments || []).map((c) => ({
     id: c.id, assetId: c.assetId, authorId: c.authorId, authorName: c.authorName,
     message: c.message, at: c.at,
@@ -4448,6 +4563,10 @@ function parseBackupWorkbook(wb) {
     authUserId: r.authUserId || null, role: r.role, locationId: r.locationId ? String(r.locationId) : null,
   }));
 
+  const userLocations = sheetRows(wb, "UserLocations").map((r) => ({
+    id: String(r.id), userId: String(r.userId), locationId: String(r.locationId),
+  }));
+
   const comments = sheetRows(wb, "Comments").map((r) => ({
     id: String(r.id), assetId: String(r.assetId), authorId: String(r.authorId || ""),
     authorName: r.authorName, message: r.message, at: r.at,
@@ -4459,7 +4578,7 @@ function parseBackupWorkbook(wb) {
     userName: r.userName, message: r.message,
   }));
 
-  return { locations, categories, assets, maintenance, users, comments, auditLog };
+  return { locations, categories, assets, maintenance, users, userLocations, comments, auditLog };
 }
 
 /* ---------------------------------------------------------
@@ -4603,11 +4722,12 @@ function ActivityLogView({ data, isAdmin, scopedLocationId, persist, showToast, 
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [clearConfirmText, setClearConfirmText] = useState("");
 
-  // Regional Staff only ever see activity tagged with their own location
-  // (see withLog's locationId param) — Admins see the full, unfiltered log.
+  // Primary Location + any Additional Locations an Overall Admin has
+  // assigned this user — Admins see the full, unfiltered log.
+  const scopedLocationIds = scopedLocationId ? userLocationIds(currentUser, data) : null;
   const scopedLog = useMemo(
-    () => (scopedLocationId ? (data.auditLog || []).filter((l) => l.locationId === scopedLocationId) : (data.auditLog || [])),
-    [data.auditLog, scopedLocationId]
+    () => (scopedLocationIds ? (data.auditLog || []).filter((l) => scopedLocationIds.includes(l.locationId)) : (data.auditLog || [])),
+    [data.auditLog, scopedLocationIds]
   );
 
   const userOptions = useMemo(() => {
@@ -4879,6 +4999,15 @@ function GlobalStyles() {
          (right) run side by side so the modal reads across, not down. */
       .detail-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
       .detail-hero-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+
+      .location-pill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+      .location-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 4px 6px 4px 10px; }
+      .location-pill button { border: none; background: none; color: inherit; cursor: pointer; padding: 2px; border-radius: 999px; display: inline-flex; opacity: 0.7; }
+      .location-pill button:hover { opacity: 1; background: rgba(0,0,0,0.08); }
+      .location-pill-add { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--accent); background: none; border: 1px dashed var(--border); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
+      .location-pill-add:hover { background: var(--accent-soft); }
+      .location-pill-picker { min-width: 200px; }
+      .user-extra-locations { font-size: 11px; color: var(--text-soft); }
 
       /* Compact single-strip "Needs Attention" alert — deliberately NOT a
          tall boxed list, so it stays out of the way of the actual asset

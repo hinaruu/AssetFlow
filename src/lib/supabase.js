@@ -142,6 +142,16 @@ const TABLES = {
     toRow: (r) => ({ id: r.id, user_id: r.userId || null, asset_id: r.assetId || null, last_read_at: r.lastReadAt || null }),
     fromRow: (r) => ({ id: r.id, userId: r.user_id, assetId: r.asset_id, lastReadAt: r.last_read_at }),
   },
+  // Additional (non-primary) locations an Overall Admin has associated a
+  // user with — see add-multi-location-users.sql. A user's Primary
+  // Location stays users.location_id, unchanged; this only ever adds to
+  // it. `id` is deterministic (userId::locationId) so re-adding the same
+  // pair is a harmless no-op upsert rather than a duplicate row.
+  userLocations: {
+    table: "user_locations",
+    toRow: (ul) => ({ id: ul.id, user_id: ul.userId, location_id: ul.locationId }),
+    fromRow: (r) => ({ id: r.id, userId: r.user_id, locationId: r.location_id }),
+  },
 };
 
 /**
